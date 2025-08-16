@@ -136,11 +136,9 @@ if __name__ == "__main__":
     logger.info("🎯 python-telegram-bot机器人程序开始...")
     
     try:
-        # 直接运行主函数，不使用asyncio.run()
+        # 直接运行主函数，让python-telegram-bot自己管理事件循环
         import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        success = loop.run_until_complete(main())
+        success = asyncio.run(main())
         if success:
             logger.info("✅ python-telegram-bot机器人运行完成")
         else:
@@ -151,10 +149,5 @@ if __name__ == "__main__":
         logger.error(f"❌ 主程序异常: {e}")
         import traceback
         logger.error(f"❌ 详细错误: {traceback.format_exc()}")
-    finally:
-        try:
-            loop.close()
-        except:
-            pass
     
     logger.info("👋 python-telegram-bot机器人程序结束")
