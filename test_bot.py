@@ -135,7 +135,7 @@ async def main():
         logger.info("💡 请发送 /start 命令测试机器人")
         
         # 保持运行
-        await app.idle()
+        await idle()
         
     except Exception as e:
         logger.error(f"❌ 启动失败: {e}")
