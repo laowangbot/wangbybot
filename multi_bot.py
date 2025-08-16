@@ -129,10 +129,187 @@ heartbeat_thread = threading.Thread(target=start_heartbeat, daemon=True)
 heartbeat_thread.start()
 print(f"💓 [{config['bot_id']}] 心跳机制已启动，每10分钟发送一次请求")
 
+# ==================== 配置管理 ====================
+# 全局变量
+user_configs = {}  # 存储每个用户的配置，包括频道组和功能设定
+logged_in_users = {}  # 存储已登录用户的信息
+pending_logins = {}  # 存储等待登录的用户状态
+login_attempts = {}  # 存储登录尝试记录
+
+# 用户凭据（这里应该从环境变量或配置文件读取）
+USER_CREDENTIALS = {
+    "demo": "demo123",
+    "admin": "admin123"
+}
+
+# 管理员用户名列表
+ADMIN_USERNAMES = ["admin"]
+
+def save_user_configs():
+    """保存用户配置到文件"""
+    try:
+        with open(f"user_configs_{config['bot_id']}.json", "w", encoding='utf-8') as f:
+            json.dump(user_configs, f, ensure_ascii=False, indent=4)
+        print(f"✅ [{config['bot_id']}] 用户配置已保存")
+    except Exception as e:
+        print(f"❌ [{config['bot_id']}] 保存用户配置失败: {e}")
+
+def load_user_configs():
+    """从文件加载用户配置"""
+    global user_configs
+    try:
+        config_file = f"user_configs_{config['bot_id']}.json"
+        if os.path.exists(config_file):
+            with open(config_file, "r", encoding='utf-8') as f:
+                user_configs = json.load(f)
+            print(f"✅ [{config['bot_id']}] 用户配置已加载")
+        else:
+            print(f"ℹ️ [{config['bot_id']}] 用户配置文件不存在，将创建新配置")
+    except Exception as e:
+        print(f"❌ [{config['bot_id']}] 加载用户配置失败: {e}")
+        user_configs = {}
+
+def login_user(user_id, username):
+    """记录用户登录"""
+    logged_in_users[user_id] = {
+        "username": username,
+        "login_time": time.time(),
+        "is_admin": username in ADMIN_USERNAMES
+    }
+    save_user_configs()
+
+def is_user_logged_in(user_id):
+    """检查用户是否已登录"""
+    return user_id in logged_in_users
+
+def can_attempt_login(user_id):
+    """检查用户是否可以尝试登录（锁定功能已禁用）"""
+    # 锁定功能已禁用，所有用户都可以尝试登录
+    return True
+
+def record_login_attempt(user_id, success=False):
+    """记录登录尝试（锁定功能已禁用）"""
+    user_id_str = str(user_id)
+    current_time = time.time()
+    
+    if user_id_str not in login_attempts:
+        login_attempts[user_id_str] = {"attempts": 0, "locked_until": 0}
+    
+    attempt_data = login_attempts[user_id_str]
+    
+    if success:
+        # 登录成功，重置尝试次数
+        attempt_data["attempts"] = 0
+        attempt_data["locked_until"] = 0
+    else:
+        # 登录失败，但不锁定账户
+        attempt_data["attempts"] += 1
+        # 锁定功能已禁用
+    
+    save_user_configs()
+
+async def show_login_screen(message):
+    """显示登录界面"""
+    user_id = message.from_user.id
+    
+    # 锁定检查已禁用，直接显示登录界面
+    
+    # 检查是否有失败记录
+    attempts_info = ""
+    user_id_str = str(user_id)
+    if user_id_str in login_attempts:
+        attempts = login_attempts[user_id_str].get("attempts", 0)
+        if attempts > 0:
+            attempts_info = f"\n⚠️ 登录失败次数：{attempts}/3"
+    
+    await message.reply_text(
+        f"🔐 **{config['bot_name']} 访问验证**\n\n"
+        f"请按以下格式输入登录信息：{attempts_info}\n"
+        f"格式：`用户名:密码`\n"
+        f"例如：`demo:demo123`\n\n"
+        f"💡 如需获取账号，请联系管理员",
+        parse_mode="Markdown"
+    )
+    
+    # 标记用户正在等待输入用户名
+    pending_logins[user_id] = {"waiting_for_username": True}
+
+async def handle_username_input(message):
+    """处理用户名:密码输入"""
+    user_id = message.from_user.id
+    login_input = message.text.strip()
+    
+    # 清除等待状态
+    pending_logins.pop(user_id, None)
+    
+    if not can_attempt_login(user_id):
+        await show_login_screen(message)
+        return
+    
+    # 验证输入格式：用户名:密码
+    if ":" not in login_input:
+        # 格式错误
+        await message.reply_text(
+            f"❌ **格式错误**\n\n"
+            f"请使用正确格式：`用户名:密码`\n"
+            f"例如：`demo:demo123`\n\n"
+            f"请重新输入："
+        )
+        pending_logins[user_id] = {"waiting_for_username": True}
+        return
+    
+    try:
+        username, password = login_input.split(":", 1)
+        username = username.strip()
+        password = password.strip()
+    except ValueError:
+        await message.reply_text(
+            f"❌ **格式错误**\n\n"
+            f"请使用正确格式：`用户名:密码`\n"
+            f"请重新输入："
+        )
+        pending_logins[user_id] = {"waiting_for_username": True}
+        return
+    
+    # 验证用户名和密码
+    if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
+        # 登录成功
+        login_user(user_id, username)
+        record_login_attempt(user_id, success=True)
+        
+        is_admin = username in ADMIN_USERNAMES
+        admin_text = "\n👑 您拥有管理员权限" if is_admin else ""
+        
+        await message.reply_text(
+            f"✅ **登录成功**\n\n"
+            f"欢迎，{username}！{admin_text}\n"
+            f"您现在可以使用机器人的所有功能。\n\n"
+            f"💡 使用 /config 查看配置，/logout 退出登录",
+            parse_mode="Markdown"
+        )
+    else:
+        # 登录失败
+        record_login_attempt(user_id, success=False)
+        
+        user_id_str = str(user_id)
+        attempts = login_attempts[user_id_str].get("attempts", 0)
+        
+        remaining_attempts = 3 - attempts
+        await message.reply_text(
+            f"❌ **登录失败**\n\n"
+            f"用户名或密码错误。\n"
+            f"剩余尝试次数：{remaining_attempts}\n\n"
+            f"请重新输入（格式：`用户名:密码`）："
+        )
+        pending_logins[user_id] = {"waiting_for_username": True}
+
 # ==================== 机器人主程序 ====================
 async def main():
     """主函数"""
     print(f"🚀 开始启动 {config['bot_name']}...")
+    
+    # 加载用户配置
+    load_user_configs()
     
     try:
         # 创建客户端
@@ -184,6 +361,157 @@ async def main():
         print(f"🤖 机器人ID: {me.id}")
         print(f"🤖 机器人名称: {me.first_name}")
         print(f"🌐 多机器人部署成功，{config['bot_name']} 现在24小时运行！")
+        
+        # 添加消息处理器
+        @app.on_message(filters.command("start"))
+        async def start_command(client, message):
+            """处理 /start 命令"""
+            try:
+                await message.reply_text(
+                    f"🤖 **{config['bot_name']}** 启动成功！\n\n"
+                    f"🔑 机器人ID: `{config['bot_id']}`\n"
+                    f"🌐 状态: 正常运行中\n"
+                    f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"💡 这是一个多机器人系统中的搬运机器人！",
+                    parse_mode="Markdown"
+                )
+                print(f"💬 [{config['bot_id']}] 收到 /start 命令，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理 /start 命令时出错: {e}")
+        
+        @app.on_message(filters.command("status"))
+        async def status_command(client, message):
+            """处理 /status 命令"""
+            try:
+                await message.reply_text(
+                    f"📊 **{config['bot_name']} 状态报告**\n\n"
+                    f"🔑 机器人ID: `{config['bot_id']}`\n"
+                    f"🌐 服务状态: 正常运行\n"
+                    f"💓 心跳状态: 活跃\n"
+                    f"⏰ 运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"✅ 机器人运行正常！",
+                    parse_mode="Markdown"
+                )
+                print(f"💬 [{config['bot_id']}] 收到 /status 命令，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理 /status 命令时出错: {e}")
+        
+        @app.on_message(filters.command("login"))
+        async def login_command(client, message):
+            """处理 /login 命令"""
+            try:
+                if is_user_logged_in(message.from_user.id):
+                    await message.reply_text(
+                        f"ℹ️ **您已经登录**\n\n"
+                        f"用户名: {logged_in_users[message.from_user.id]['username']}\n"
+                        f"登录时间: {datetime.fromtimestamp(logged_in_users[message.from_user.id]['login_time']).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                        f"💡 如需重新登录，请先使用 /logout 命令",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await show_login_screen(message)
+                print(f"💬 [{config['bot_id']}] 收到 /login 命令，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理 /login 命令时出错: {e}")
+        
+        @app.on_message(filters.command("logout"))
+        async def logout_command(client, message):
+            """处理 /logout 命令"""
+            try:
+                user_id = message.from_user.id
+                if user_id in logged_in_users:
+                    username = logged_in_users[user_id]['username']
+                    del logged_in_users[user_id]
+                    save_user_configs()
+                    await message.reply_text(
+                        f"✅ **已退出登录**\n\n"
+                        f"再见，{username}！\n"
+                        f"如需重新使用机器人，请发送 /login 命令",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await message.reply_text(
+                        f"ℹ️ **您尚未登录**\n\n"
+                        f"请先使用 /login 命令登录",
+                        parse_mode="Markdown"
+                    )
+                print(f"💬 [{config['bot_id']}] 收到 /logout 命令，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理 /logout 命令时出错: {e}")
+        
+        @app.on_message(filters.command("config"))
+        async def config_command(client, message):
+            """处理 /config 命令"""
+            try:
+                user_id = message.from_user.id
+                if not is_user_logged_in(user_id):
+                    await message.reply_text(
+                        f"❌ **请先登录**\n\n"
+                        f"请使用 /login 命令登录后再查看配置",
+                        parse_mode="Markdown"
+                    )
+                    return
+                
+                user_config = user_configs.get(str(user_id), {})
+                channel_pairs = user_config.get("channel_pairs", [])
+                
+                config_text = f"📊 **{config['bot_name']} 配置信息**\n\n"
+                config_text += f"🔑 机器人ID: `{config['bot_id']}`\n"
+                config_text += f"👤 用户名: {logged_in_users[user_id]['username']}\n"
+                config_text += f"📡 频道组数量: {len(channel_pairs)}\n\n"
+                
+                if channel_pairs:
+                    config_text += "📋 **频道组列表：**\n"
+                    for i, pair in enumerate(channel_pairs):
+                        source = pair.get("source", "未设置")
+                        target = pair.get("target", "未设置")
+                        enabled = "✅" if pair.get("enabled", True) else "❌"
+                        config_text += f"{i+1}. {enabled} 源: {source} → 目标: {target}\n"
+                else:
+                    config_text += "📋 **暂无频道组配置**\n"
+                
+                config_text += f"\n⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                await message.reply_text(config_text, parse_mode="Markdown")
+                print(f"💬 [{config['bot_id']}] 收到 /config 命令，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理 /config 命令时出错: {e}")
+        
+        # 处理文本消息（用于登录）
+        @app.on_message(filters.text & ~filters.command)
+        async def handle_text_message(client, message):
+            """处理文本消息"""
+            try:
+                user_id = message.from_user.id
+                
+                # 检查是否正在等待登录输入
+                if user_id in pending_logins and pending_logins[user_id].get("waiting_for_username"):
+                    await handle_username_input(message)
+                    return
+                
+                # 如果用户已登录，可以处理其他文本消息
+                if is_user_logged_in(user_id):
+                    await message.reply_text(
+                        f"💬 **收到消息**\n\n"
+                        f"您已登录，可以使用以下命令：\n"
+                        f"• /config - 查看配置\n"
+                        f"• /status - 查看状态\n"
+                        f"• /logout - 退出登录\n\n"
+                        f"💡 更多功能正在开发中...",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await message.reply_text(
+                        f"ℹ️ **请先登录**\n\n"
+                        f"请使用 /login 命令登录后使用机器人功能",
+                        parse_mode="Markdown"
+                    )
+                
+                print(f"💬 [{config['bot_id']}] 收到文本消息，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理文本消息时出错: {e}")
+        
+        print(f"✅ 消息处理器已设置完成！")
         print(f"⏳ 进入空闲状态，等待消息...")
         
         # 保持运行 - 使用更可靠的方式

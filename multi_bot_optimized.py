@@ -230,6 +230,42 @@ async def main():
         print(f"🤖 [{config['bot_id']}] 机器人ID: {me.id}")
         print(f"🤖 [{config['bot_id']}] 机器人名称: {me.first_name}")
         print(f"🌐 [{config['bot_id']}] 优化机器人部署成功，{config['bot_name']} 现在24小时运行！")
+        
+        # 添加消息处理器
+        @app.on_message(filters.command("start"))
+        async def start_command(client, message):
+            """处理 /start 命令"""
+            try:
+                await message.reply_text(
+                    f"🤖 **{config['bot_name']}** 启动成功！\n\n"
+                    f"🔑 机器人ID: `{config['bot_id']}`\n"
+                    f"🌐 状态: 正常运行中\n"
+                    f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"💡 这是一个多机器人系统中的搬运机器人！",
+                    parse_mode="Markdown"
+                )
+                print(f"💬 [{config['bot_id']}] 收到 /start 命令，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理 /start 命令时出错: {e}")
+        
+        @app.on_message(filters.command("status"))
+        async def status_command(client, message):
+            """处理 /status 命令"""
+            try:
+                await message.reply_text(
+                    f"📊 **{config['bot_name']} 状态报告**\n\n"
+                    f"🔑 机器人ID: `{config['bot_id']}`\n"
+                    f"🌐 服务状态: 正常运行\n"
+                    f"💓 心跳状态: 活跃\n"
+                    f"⏰ 运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"✅ 机器人运行正常！",
+                    parse_mode="Markdown"
+                )
+                print(f"💬 [{config['bot_id']}] 收到 /status 命令，来自用户 {message.from_user.id}")
+            except Exception as e:
+                print(f"❌ [{config['bot_id']}] 处理 /status 命令时出错: {e}")
+        
+        print(f"✅ [{config['bot_id']}] 消息处理器已设置完成！")
         print(f"⏳ [{config['bot_id']}] 进入空闲状态，等待消息...")
         
         # 保持运行 - 使用更可靠的方式

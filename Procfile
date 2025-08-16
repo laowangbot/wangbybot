@@ -1,1 +1,1 @@
-worker: python csmain.py
+worker: python csmain_multi_full.py
