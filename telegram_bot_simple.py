@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-使用python-telegram-bot的Telegram机器人
+使用python-telegram-bot的简单Telegram机器人（同步版本）
 """
 
 import os
@@ -45,7 +45,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"📱 收到 /start 命令，来自用户 {user_id}")
     
     try:
-        await update.message.reply_text("🚀 python-telegram-bot机器人启动成功！")
+        await update.message.reply_text("🚀 简单版机器人启动成功！")
         logger.info("✅ /start 命令响应成功")
     except Exception as e:
         logger.error(f"❌ /start 命令响应失败: {e}")
@@ -61,28 +61,6 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ /ping 命令响应失败: {e}")
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """状态命令"""
-    user_id = update.effective_user.id
-    logger.info(f"📊 收到 /status 命令，来自用户 {user_id}")
-    
-    try:
-        await update.message.reply_text("📊 机器人状态：正常运行中！")
-        logger.info("✅ /status 命令响应成功")
-    except Exception as e:
-        logger.error(f"❌ /status 命令响应失败: {e}")
-
-async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """测试命令"""
-    user_id = update.effective_user.id
-    logger.info(f"🧪 收到 /test 命令，来自用户 {user_id}")
-    
-    try:
-        await update.message.reply_text("🧪 测试命令响应正常！")
-        logger.info("✅ /test 命令响应成功")
-    except Exception as e:
-        logger.error(f"❌ /test 命令响应失败: {e}")
-
 # 处理所有文本消息
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理所有文本消息"""
@@ -92,15 +70,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"💬 收到文本消息: {text}... 来自用户 {user_id}")
         
         try:
-            await update.message.reply_text("👋 收到您的消息！python-telegram-bot机器人工作正常！")
+            await update.message.reply_text("👋 收到您的消息！简单版机器人工作正常！")
             logger.info("✅ 文本消息响应成功")
         except Exception as e:
             logger.error(f"❌ 文本消息响应失败: {e}")
 
-# 主函数
-async def main():
-    """主函数"""
-    logger.info("🚀 开始启动python-telegram-bot机器人...")
+def main():
+    """主函数（同步版本）"""
+    logger.info("🚀 开始启动简单版机器人...")
     
     try:
         # 创建应用
@@ -110,19 +87,17 @@ async def main():
         # 添加命令处理器
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("ping", ping_command))
-        application.add_handler(CommandHandler("status", status_command))
-        application.add_handler(CommandHandler("test", test_command))
         
         # 添加消息处理器
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
         
         logger.info("✅ 机器人配置完成！")
-        logger.info("🌐 python-telegram-bot机器人部署成功！")
+        logger.info("🌐 简单版机器人部署成功！")
         logger.info("⏳ 进入空闲状态，等待消息...")
         logger.info("💡 请发送 /start 命令测试机器人")
         
-        # 启动机器人
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # 启动机器人（同步方式）
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
         logger.error(f"❌ 启动失败: {e}")
@@ -133,36 +108,20 @@ async def main():
     return True
 
 if __name__ == "__main__":
-    logger.info("🎯 python-telegram-bot机器人程序开始...")
+    logger.info("🎯 简单版机器人程序开始...")
     
     try:
-        # 使用同步方式启动，避免事件循环冲突
-        import asyncio
-        
-        # 创建新的事件循环
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # 在事件循环中运行主函数
-        success = loop.run_until_complete(main())
-        
+        # 直接调用主函数，不使用asyncio
+        success = main()
         if success:
-            logger.info("✅ python-telegram-bot机器人运行完成")
+            logger.info("✅ 简单版机器人运行完成")
         else:
-            logger.error("❌ python-telegram-bot机器人运行失败")
-            
+            logger.error("❌ 简单版机器人运行失败")
     except KeyboardInterrupt:
         logger.info("🛑 收到中断信号")
     except Exception as e:
         logger.error(f"❌ 主程序异常: {e}")
         import traceback
         logger.error(f"❌ 详细错误: {traceback.format_exc()}")
-    finally:
-        # 清理事件循环
-        try:
-            if 'loop' in locals():
-                loop.close()
-        except:
-            pass
     
-    logger.info("👋 python-telegram-bot机器人程序结束")
+    logger.info("👋 简单版机器人程序结束")
