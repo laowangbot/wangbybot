@@ -201,8 +201,19 @@ async def main():
         print(f"🌐 [{config['bot_id']}] 优化机器人部署成功，{config['bot_name']} 现在24小时运行！")
         print(f"⏳ [{config['bot_id']}] 进入空闲状态，等待消息...")
         
-        # 保持运行
-        await idle()
+        # 保持运行 - 使用更可靠的方式
+        print(f"🔄 [{config['bot_id']}] 进入无限循环，保持机器人运行...")
+        while True:
+            try:
+                await asyncio.sleep(60)  # 每分钟检查一次
+                # 可以在这里添加健康检查
+                print(f"💚 [{config['bot_id']}] 机器人运行中...")
+            except KeyboardInterrupt:
+                print(f"🛑 [{config['bot_id']}] 收到中断信号")
+                break
+            except Exception as e:
+                print(f"⚠️ [{config['bot_id']}] 循环中出错: {e}")
+                await asyncio.sleep(5)  # 出错后等待5秒继续
         
     except Exception as e:
         print(f"❌ [{config['bot_id']}] 启动失败: {e}")
