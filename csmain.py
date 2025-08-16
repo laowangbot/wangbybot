@@ -457,6 +457,36 @@ USER_CREDENTIALS = {
     "admin": "159413"  # 用户名: 密码
 }
 
+# ==================== 多机器人配置管理 ====================
+def get_bot_config():
+    """获取机器人配置"""
+    # 从环境变量获取机器人标识
+    bot_id = os.environ.get('BOT_ID', 'main')
+    bot_name = os.environ.get('BOT_NAME', f'老湿姬{bot_id}')
+    bot_version = os.environ.get('BOT_VERSION', '多机器人版本')
+    
+    # 从环境变量获取Telegram配置
+    api_id = os.environ.get('API_ID')
+    api_hash = os.environ.get('API_HASH')
+    bot_token = os.environ.get('BOT_TOKEN')
+    
+    if not all([api_id, api_hash, bot_token]):
+        raise ValueError("缺少必需的环境变量: API_ID, API_HASH, BOT_TOKEN")
+    
+    return {
+        'bot_id': bot_id,
+        'bot_name': bot_name,
+        'bot_version': bot_version,
+        'api_id': api_id,
+        'api_hash': api_hash,
+        'bot_token': bot_token
+    }
+
+# 获取配置
+bot_config = get_bot_config()
+print(f"🤖 启动机器人: {bot_config['bot_name']} - {bot_config['bot_version']}")
+print(f"🔑 机器人ID: {bot_config['bot_id']}")
+
 app = Client(f"{bot_config['bot_id']}_session", api_id=bot_config['api_id'], api_hash=bot_config['api_hash'], bot_token=bot_config['bot_token'])
 
 # ==================== 全局状态 ====================
@@ -1178,36 +1208,6 @@ async def cooperative_sleep(task_obj: dict, seconds: int):
         if remaining <= 3:
             await asyncio.sleep(remaining)
             break
-
-# ==================== 多机器人配置管理 ====================
-def get_bot_config():
-    """获取机器人配置"""
-    # 从环境变量获取机器人标识
-    bot_id = os.environ.get('BOT_ID', 'main')
-    bot_name = os.environ.get('BOT_NAME', f'老湿姬{bot_id}')
-    bot_version = os.environ.get('BOT_VERSION', '多机器人版本')
-    
-    # 从环境变量获取Telegram配置
-    api_id = os.environ.get('API_ID')
-    api_hash = os.environ.get('API_HASH')
-    bot_token = os.environ.get('BOT_TOKEN')
-    
-    if not all([api_id, api_hash, bot_token]):
-        raise ValueError("缺少必需的环境变量: API_ID, API_HASH, BOT_TOKEN")
-    
-    return {
-        'bot_id': bot_id,
-        'bot_name': bot_name,
-        'bot_version': bot_version,
-        'api_id': api_id,
-        'api_hash': api_hash,
-        'bot_token': bot_token
-    }
-
-# 获取配置
-bot_config = get_bot_config()
-print(f"🤖 启动机器人: {bot_config['bot_name']} - {bot_config['bot_version']}")
-print(f"🔑 机器人ID: {bot_config['bot_id']}")
 
 # ==================== 持久化函数 ====================
 def save_configs():
