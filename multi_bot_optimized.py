@@ -234,25 +234,23 @@ async def main():
         
         # 保持运行 - 使用更可靠的方式
         print(f"🔄 [{config['bot_id']}] 进入无限循环，保持机器人运行...")
-        while True:
-            try:
-                await asyncio.sleep(60)  # 每分钟检查一次
-                # 可以在这里添加健康检查
-                print(f"💚 [{config['bot_id']}] 机器人运行中...")
-            except KeyboardInterrupt:
-                print(f"🛑 [{config['bot_id']}] 收到中断信号")
-                break
-            except Exception as e:
-                print(f"⚠️ [{config['bot_id']}] 循环中出错: {e}")
-                await asyncio.sleep(5)  # 出错后等待5秒继续
+        try:
+            while True:
+                try:
+                    await asyncio.sleep(60)  # 每分钟检查一次
+                    # 可以在这里添加健康检查
+                    print(f"💚 [{config['bot_id']}] 机器人运行中...")
+                except KeyboardInterrupt:
+                    print(f"🛑 [{config['bot_id']}] 收到中断信号")
+                    break
+                except Exception as e:
+                    print(f"⚠️ [{config['bot_id']}] 循环中出错: {e}")
+                    await asyncio.sleep(5)  # 出错后等待5秒继续
+        except Exception as e:
+            print(f"❌ [{config['bot_id']}] 运行循环出错: {e}")
+            return False
         
-    except Exception as e:
-        print(f"❌ [{config['bot_id']}] 启动失败: {e}")
-        import traceback
-        print(f"❌ [{config['bot_id']}] 详细错误: {traceback.format_exc()}")
-        return False
-    
-    return True
+        return True
 
 if __name__ == "__main__":
     print(f"🎯 [{config['bot_id']}] {config['bot_name']} 程序开始...")
