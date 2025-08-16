@@ -1,6 +1,50 @@
 # ==================== 代码版本确认 ====================
 print("正在运行老湿姬2.0专版 - 纯新引擎版本...")
 
+# 添加端口绑定功能（用于Render Web Service）
+def start_port_server():
+    """启动端口服务器，用于Render Web Service"""
+    try:
+        import socket
+        import http.server
+        import socketserver
+        
+        class SimpleHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                response = """
+                <html>
+                <head><title>机器人运行中</title></head>
+                <body>
+                <h1>🤖 老湿姬2.0专版机器人</h1>
+                <p>状态：正常运行中</p>
+                <p>时间：{}</p>
+                </body>
+                </html>
+                """.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                self.wfile.write(response.encode())
+            
+            def log_message(self, format, *args):
+                # 禁用HTTP访问日志
+                pass
+        
+        # 绑定到Render分配的端口
+        port = int(os.environ.get('PORT', 8080))
+        
+        with socketserver.TCPServer(("", port), SimpleHandler) as httpd:
+            print(f"🌐 端口服务器启动成功，监听端口 {port}")
+            httpd.serve_forever()
+    
+    except Exception as e:
+        print(f"⚠️ 端口服务器启动失败: {e}")
+
+# 在后台启动端口服务器
+import threading
+port_thread = threading.Thread(target=start_port_server, daemon=True)
+port_thread.start()
+
 import os
 import time
 import asyncio
@@ -11,6 +55,7 @@ import json
 import random
 import signal
 import sys
+from datetime import datetime
 from collections import defaultdict
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
