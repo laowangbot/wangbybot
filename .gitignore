@@ -20,7 +20,7 @@ venv.bak/
 *.session-journal
 
 # 配置文件（包含API密钥等敏感信息）
-config.py
+# config.py - 现在包含在仓库中用于云部署
 user_*.json
 user_configs.json
 user_history.json
