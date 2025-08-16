@@ -462,22 +462,12 @@ def is_admin_user(user_id):
     return False
 
 def can_attempt_login(user_id):
-    """检查用户是否可以尝试登录（检查锁定状态）"""
-    user_id_str = str(user_id)
-    if user_id_str not in login_attempts:
-        return True
-    
-    attempt_data = login_attempts[user_id_str]
-    locked_until = attempt_data.get("locked_until", 0)
-    current_time = time.time()
-    
-    if locked_until > current_time:
-        return False
-    
+    """检查用户是否可以尝试登录（锁定功能已禁用）"""
+    # 锁定功能已禁用，所有用户都可以尝试登录
     return True
 
 def record_login_attempt(user_id, success=False):
-    """记录登录尝试"""
+    """记录登录尝试（锁定功能已禁用）"""
     user_id_str = str(user_id)
     current_time = time.time()
     
@@ -492,11 +482,9 @@ def record_login_attempt(user_id, success=False):
         attempt_data["attempts"] = 0
         attempt_data["locked_until"] = 0
     else:
-        # 登录失败，增加尝试次数
+        # 登录失败，但不锁定账户
         attempt_data["attempts"] += 1
-        if attempt_data["attempts"] >= 3:
-            # 锁定1小时
-            attempt_data["locked_until"] = current_time + 3600
+        # 锁定功能已禁用
     
     save_login_data()
 
@@ -542,20 +530,7 @@ async def show_login_screen(message):
     """显示登录界面"""
     user_id = message.from_user.id
     
-    if not can_attempt_login(user_id):
-        user_id_str = str(user_id)
-        locked_until = login_attempts[user_id_str].get("locked_until", 0)
-        remaining_time = int(locked_until - time.time())
-        await message.reply_text(
-            f"🔒 **账户已锁定**\n\n"
-            f"由于多次登录失败，您的账户已被暂时锁定。\n"
-            f"剩余锁定时间：{remaining_time // 60} 分钟 {remaining_time % 60} 秒\n\n"
-            f"请稍后再试。",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 刷新状态", callback_data="refresh_login_status")
-            ]])
-        )
-        return
+    # 锁定检查已禁用，直接显示登录界面
     
     # 检查是否有失败记录
     attempts_info = ""
@@ -2122,15 +2097,7 @@ async def callback_handler(client, callback_query):
     if data == "refresh_login_status":
         if can_attempt_login(user_id):
             await show_login_screen(callback_query.message)
-        else:
-            user_id_str = str(user_id)
-            locked_until = login_attempts[user_id_str].get("locked_until", 0)
-            remaining_time = int(locked_until - time.time())
-            try:
-                await callback_query.answer(f"账户仍被锁定，剩余时间：{remaining_time // 60}分{remaining_time % 60}秒")
-            except Exception as e:
-                logging.warning(f"回调查询应答失败: {e}")
-            return
+        # 锁定检查已禁用，继续处理
     
     # 其他回调需要登录验证
     if not is_user_logged_in(user_id):
