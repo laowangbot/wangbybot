@@ -8,7 +8,7 @@ import os
 import asyncio
 import logging
 import time
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 
 # 配置日志
 logging.basicConfig(
