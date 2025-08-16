@@ -251,6 +251,12 @@ async def main():
             return False
         
         return True
+        
+    except Exception as e:
+        print(f"❌ [{config['bot_id']}] 启动失败: {e}")
+        import traceback
+        print(f"❌ [{config['bot_id']}] 详细错误: {traceback.format_exc()}")
+        return False
 
 if __name__ == "__main__":
     print(f"🎯 [{config['bot_id']}] {config['bot_name']} 程序开始...")
