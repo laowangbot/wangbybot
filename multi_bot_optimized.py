@@ -16,7 +16,7 @@ import signal
 import sys
 from datetime import datetime, timedelta
 from collections import defaultdict
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from pyrogram.enums import ChatType
 from pyrogram.errors.exceptions import BadRequest, FloodWait
@@ -202,7 +202,7 @@ async def main():
         print(f"⏳ [{config['bot_id']}] 进入空闲状态，等待消息...")
         
         # 保持运行
-        await app.idle()
+        await idle()
         
     except Exception as e:
         print(f"❌ [{config['bot_id']}] 启动失败: {e}")
