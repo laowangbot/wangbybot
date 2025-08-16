@@ -1,1 +1,0 @@
-worker: python csmain.py
