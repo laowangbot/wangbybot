@@ -45,6 +45,33 @@ import threading
 port_thread = threading.Thread(target=start_port_server, daemon=True)
 port_thread.start()
 
+# 添加心跳机制，保持Render服务活跃
+def start_heartbeat():
+    """启动心跳机制，防止Render 15分钟自动停止"""
+    import requests
+    import time
+    
+    while True:
+        try:
+            # 获取当前服务URL
+            service_url = os.environ.get('RENDER_EXTERNAL_URL')
+            if service_url:
+                # 向自己的服务发送请求，保持活跃
+                response = requests.get(f"{service_url}/", timeout=10)
+                print(f"💓 心跳请求成功: {response.status_code}")
+            else:
+                print("💓 心跳机制运行中（无外部URL）")
+        except Exception as e:
+            print(f"💓 心跳请求失败: {e}")
+        
+        # 每10分钟发送一次心跳
+        time.sleep(600)
+
+# 启动心跳线程
+heartbeat_thread = threading.Thread(target=start_heartbeat, daemon=True)
+heartbeat_thread.start()
+print("💓 心跳机制已启动，每10分钟发送一次请求")
+
 import os
 import time
 import asyncio
