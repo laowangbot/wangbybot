@@ -457,7 +457,7 @@ USER_CREDENTIALS = {
     "admin": "159413"  # 用户名: 密码
 }
 
-app = Client(f"{config['bot_id']}_session", api_id=config['api_id'], api_hash=config['api_hash'], bot_token=config['bot_token'])
+app = Client(f"{bot_config['bot_id']}_session", api_id=bot_config['api_id'], api_hash=bot_config['api_hash'], bot_token=bot_config['bot_token'])
 
 # ==================== 全局状态 ====================
 user_configs = {}  # 存储每个用户的配置，包括频道组和功能设定
@@ -478,34 +478,34 @@ pending_logins = {}   # {user_id: {"waiting_for_username": True}}
 def save_login_data():
     """保存登录数据到文件"""
     try:
-        login_file = f"user_login_{config['bot_id']}.json"
+        login_file = f"user_login_{bot_config['bot_id']}.json"
         login_data = {
             "logged_in_users": logged_in_users,
             "login_attempts": login_attempts
         }
         with open(login_file, "w", encoding="utf-8") as f:
             json.dump(login_data, f, ensure_ascii=False, indent=4)
-        logging.info(f"[{config['bot_id']}] 登录数据已保存到 {login_file}")
+        logging.info(f"[{bot_config['bot_id']}] 登录数据已保存到 {login_file}")
     except Exception as e:
-        logging.error(f"[{config['bot_id']}] 保存登录数据失败: {e}")
+        logging.error(f"[{bot_config['bot_id']}] 保存登录数据失败: {e}")
 
 def load_login_data():
     """从文件加载登录数据"""
     global logged_in_users, login_attempts
     try:
-        login_file = f"user_login_{config['bot_id']}.json"
+        login_file = f"user_login_{bot_config['bot_id']}.json"
         if os.path.exists(login_file):
             with open(login_file, "r", encoding="utf-8") as f:
                 login_data = json.load(f)
                 logged_in_users = login_data.get("logged_in_users", {})
                 login_attempts = login_data.get("login_attempts", {})
-            logging.info(f"[{config['bot_id']}] 登录数据已从 {login_file} 加载")
+            logging.info(f"[{bot_config['bot_id']}] 登录数据已从 {login_file} 加载")
         else:
-            logging.info(f"[{config['bot_id']}] 登录文件 {login_file} 不存在，将创建新登录数据")
+            logging.info(f"[{bot_config['bot_id']}] 登录文件 {login_file} 不存在，将创建新登录数据")
             logged_in_users = {}
             login_attempts = {}
     except Exception as e:
-        logging.error(f"[{config['bot_id']}] 加载登录数据失败: {e}")
+        logging.error(f"[{bot_config['bot_id']}] 加载登录数据失败: {e}")
         logged_in_users = {}
         login_attempts = {}
 
@@ -1205,71 +1205,71 @@ def get_bot_config():
     }
 
 # 获取配置
-config = get_bot_config()
-print(f"🤖 启动机器人: {config['bot_name']} - {config['bot_version']}")
-print(f"🔑 机器人ID: {config['bot_id']}")
+bot_config = get_bot_config()
+print(f"🤖 启动机器人: {bot_config['bot_name']} - {bot_config['bot_version']}")
+print(f"🔑 机器人ID: {bot_config['bot_id']}")
 
 # ==================== 持久化函数 ====================
 def save_configs():
     """将用户配置保存到文件"""
-    config_file = f"user_configs_{config['bot_id']}.json"
+    config_file = f"user_configs_{bot_config['bot_id']}.json"
     with open(config_file, "w", encoding='utf-8') as f:
         json.dump(user_configs, f, ensure_ascii=False, indent=4)
-    logging.info(f"[{config['bot_id']}] 用户配置已保存到 {config_file}。")
+    logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到 {config_file}。")
 
 def load_configs():
     """从文件载入用户配置"""
     global user_configs
-    config_file = f"user_configs_{config['bot_id']}.json"
+    config_file = f"user_configs_{bot_config['bot_id']}.json"
     if os.path.exists(config_file):
         with open(config_file, "r", encoding="utf-8") as f:
             user_configs = json.load(f)
-        logging.info(f"[{config['bot_id']}] 用户配置已从 {config_file} 载入。")
+        logging.info(f"[{bot_config['bot_id']}] 用户配置已从 {config_file} 载入。")
     else:
-        logging.info(f"[{config['bot_id']}] 配置文件 {config_file} 不存在，将创建新配置。")
+        logging.info(f"[{bot_config['bot_id']}] 配置文件 {config_file} 不存在，将创建新配置。")
         user_configs = {}
 
 def save_user_states():
     """将用户状态保存到文件"""
     try:
-        config_file = f"user_states_{config['bot_id']}.json"
+        config_file = f"user_states_{bot_config['bot_id']}.json"
         with open(config_file, "w", encoding='utf-8') as f:
             json.dump(user_states, f, ensure_ascii=False, indent=4)
-        logging.info(f"[{config['bot_id']}] 用户状态已保存到 {config_file}。")
+        logging.info(f"[{bot_config['bot_id']}] 用户状态已保存到 {config_file}。")
     except Exception as e:
-        logging.error(f"[{config['bot_id']}] 保存用户状态失败: {e}")
+        logging.error(f"[{bot_config['bot_id']}] 保存用户状态失败: {e}")
 
 def load_user_states():
     """从文件载入用户状态"""
     global user_states
     try:
-        config_file = f"user_states_{config['bot_id']}.json"
+        config_file = f"user_states_{bot_config['bot_id']}.json"
         if os.path.exists(config_file):
             with open(config_file, "r", encoding="utf-8") as f:
                 user_states = json.load(f)
-            logging.info(f"[{config['bot_id']}] 用户状态已从 {config_file} 载入。")
+            logging.info(f"[{bot_config['bot_id']}] 用户状态已从 {config_file} 载入。")
         else:
             user_states = {}
-            logging.info(f"[{config['bot_id']}] 用户状态文件 {config_file} 不存在，使用空状态。")
+            logging.info(f"[{bot_config['bot_id']}] 用户状态文件 {config_file} 不存在，使用空状态。")
     except Exception as e:
-        logging.error(f"[{config['bot_id']}] 载入用户状态失败: {e}")
+        logging.error(f"[{bot_config['bot_id']}] 载入用户状态失败: {e}")
         user_states = {}
 
 def save_history():
     """将历史记录保存到文件"""
-    config_file = f"user_history_{config['bot_id']}.json"
+    config_file = f"user_history_{bot_config['bot_id']}.json"
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(user_history, f, ensure_ascii=False, indent=4)
-    logging.info(f"[{config['bot_id']}] 历史记录已保存到 {config_file}。")
+    logging.info(f"[{bot_config['bot_id']}] 历史记录已保存到 {config_file}。")
 
 def load_history():
     """从文件载入历史记录"""
     global user_history
-    config_file = f"user_history_{config['bot_id']}.json"
+    config_file = f"user_history_{bot_config['bot_id']}.json"
     if os.path.exists(config_file):
         with open(config_file, "r", encoding="utf-8") as f:
             user_history = json.load(f)
-        logging.info("历史记录已载入。")
+        logging.info(f"[{bot_config['bot_id']}] 历史记录已载入。")
 
 # ==================== 按钮设置 ====================
 def get_main_menu_buttons(user_id):
@@ -6307,9 +6307,9 @@ def start_port_server():
                 </body>
                 </html>
                 """.format(
-                    bot_name=config['bot_name'],
-                    bot_version=config['bot_version'],
-                    bot_id=config['bot_id'],
+                    bot_name=bot_config['bot_name'],
+                    bot_version=bot_config['bot_version'],
+                    bot_id=bot_config['bot_id'],
                     current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 )
                 self.wfile.write(response.encode())
@@ -6322,11 +6322,11 @@ def start_port_server():
         port = int(os.environ.get('PORT', 8080))
         
         with socketserver.TCPServer(("", port), SimpleHandler) as httpd:
-            print(f"🌐 [{config['bot_id']}] 端口服务器启动成功，监听端口 {port}")
+            print(f"🌐 [{bot_config['bot_id']}] 端口服务器启动成功，监听端口 {port}")
             httpd.serve_forever()
     
     except Exception as e:
-        print(f"⚠️ [{config['bot_id']}] 端口服务器启动失败: {e}")
+        print(f"⚠️ [{bot_config['bot_id']}] 端口服务器启动失败: {e}")
 
 def start_heartbeat():
     """启动心跳机制，防止Render 15分钟自动停止"""
@@ -6340,11 +6340,11 @@ def start_heartbeat():
             if service_url:
                 # 向自己的服务发送请求，保持活跃
                 response = requests.get(f"{service_url}/", timeout=10)
-                print(f"💓 [{config['bot_id']}] 心跳请求成功: {response.status_code}")
+                print(f"💓 [{bot_config['bot_id']}] 心跳请求成功: {response.status_code}")
             else:
-                print(f"💓 [{config['bot_id']}] 心跳机制运行中（无外部URL）")
+                print(f"💓 [{bot_config['bot_id']}] 心跳机制运行中（无外部URL）")
         except Exception as e:
-            print(f"💓 [{config['bot_id']}] 心跳请求失败: {e}")
+            print(f"💓 [{bot_config['bot_id']}] 心跳请求失败: {e}")
         
         # 每10分钟发送一次心跳
         time.sleep(600)
@@ -6364,7 +6364,7 @@ if __name__ == "__main__":
     # 启动心跳线程
     heartbeat_thread = threading.Thread(target=start_heartbeat, daemon=True)
     heartbeat_thread.start()
-    print(f"💓 [{config['bot_id']}] 心跳机制已启动，每10分钟发送一次请求")
+    print(f"💓 [{bot_config['bot_id']}] 心跳机制已启动，每10分钟发送一次请求")
     
     load_configs()
     load_history()
@@ -6401,8 +6401,8 @@ if __name__ == "__main__":
     
     # 启动总结
     print("=" * 60)
-    print(f"✅ 启动完成！{config['bot_name']} 状态:")
-    print(f"   🔑 机器人ID: {config['bot_id']}")
+    print(f"✅ 启动完成！{bot_config['bot_name']} 状态:")
+    print(f"   🔑 机器人ID: {bot_config['bot_id']}")
     print(f"   📡 新搬运引擎: {'✅ 可用' if NEW_ENGINE_AVAILABLE else '❌ 不可用'}")
     print(f"   🌐 Render部署: {'✅ 启用' if RENDER_DEPLOYMENT else '❌ 禁用'}")
     print(f"   🔐 登录验证: {'✅ 启用' if ENABLE_USERNAME_LOGIN else '❌ 禁用'}")
