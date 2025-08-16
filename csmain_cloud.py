@@ -11,7 +11,7 @@ import logging
 import time
 import signal
 import sys
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.errors import FloodWait, BadRequest
 
 # 配置日志
