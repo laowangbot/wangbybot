@@ -189,8 +189,39 @@ async def main():
             bot_token=config['bot_token']
         )
         
-        # 启动机器人
-        await app.start()
+        # 启动机器人（带FloodWait处理）
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                print(f"🔄 [{config['bot_id']}] 尝试启动机器人 (第{retry_count + 1}次)...")
+                await app.start()
+                print(f"✅ [{config['bot_id']}] 机器人启动成功！")
+                break
+            except Exception as e:
+                retry_count += 1
+                if "FLOOD_WAIT" in str(e):
+                    # 提取等待时间
+                    import re
+                    wait_match = re.search(r'wait of (\d+) seconds', str(e))
+                    if wait_match:
+                        wait_seconds = int(wait_match.group(1))
+                        wait_minutes = wait_seconds // 60
+                        print(f"⏰ [{config['bot_id']}] 遇到FloodWait，需要等待 {wait_minutes} 分钟 ({wait_seconds} 秒)")
+                        print(f"🔄 [{config['bot_id']}] 等待中...")
+                        await asyncio.sleep(wait_seconds + 10)  # 多等10秒确保安全
+                        continue
+                    else:
+                        print(f"⚠️ [{config['bot_id']}] FloodWait时间未知，等待5分钟")
+                        await asyncio.sleep(300)
+                        continue
+                elif retry_count < max_retries:
+                    print(f"⚠️ [{config['bot_id']}] 启动失败，{retry_count}秒后重试: {e}")
+                    await asyncio.sleep(retry_count * 10)
+                    continue
+                else:
+                    raise e
         
         # 获取机器人信息
         me = await app.get_me()
