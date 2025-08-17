@@ -111,6 +111,18 @@ import json
 import random
 import signal
 import sys
+
+# 持久化存储配置
+PERSISTENT_STORAGE = "/opt/render/project/src/data"
+if not os.path.exists(PERSISTENT_STORAGE):
+    os.makedirs(PERSISTENT_STORAGE, exist_ok=True)
+
+def get_config_path(filename):
+    """获取配置文件路径"""
+    if os.getenv('RENDER') == 'true':
+        return os.path.join(PERSISTENT_STORAGE, filename)
+    else:
+        return filename
 from datetime import datetime
 from collections import defaultdict
 from pyrogram import Client, filters
