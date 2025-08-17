@@ -147,19 +147,40 @@ class FloodWaitManager:
         }
     
     async def wait_if_needed(self, operation_type, user_id=None):
-        """检查是否需要等待，如果需要则等待（已移除用户限制）"""
+        """检查是否需要等待，智能处理FloodWait限制"""
         current_time = time.time()
         key = f"{operation_type}_{user_id}" if user_id else operation_type
         
-        # 只保留最基本的操作间隔控制，移除所有用户级限制
+        # 检查FloodWait限制
+        if operation_type in self.flood_wait_times:
+            wait_until = self.flood_wait_times[operation_type]
+            remaining = wait_until - current_time
+            
+            if remaining > 0:
+                # 智能等待策略
+                if remaining > 60:  # 超过1分钟，使用更激进的策略
+                    safe_wait = min(30, remaining // 2)  # 最多等待30秒
+                    logging.info(f"🔄 智能等待策略: {operation_type} 原始等待 {remaining:.1f}秒，实际等待 {safe_wait}秒")
+                    await asyncio.sleep(safe_wait)
+                    # 清除过长的限制
+                    if remaining > 120:
+                        del self.flood_wait_times[operation_type]
+                        logging.info(f"🧹 清除过长的FloodWait限制: {operation_type}")
+                else:
+                    # 正常等待
+                    logging.info(f"⏳ 等待FloodWait限制: {operation_type} 剩余 {remaining:.1f}秒")
+                    await asyncio.sleep(remaining)
+                    # 清除已完成的限制
+                    del self.flood_wait_times[operation_type]
+        
+        # 基本的操作间隔控制（最小化）
         if key in self.last_operation_time:
             last_time = self.last_operation_time[key]
-            delay_needed = self.operation_delays.get(operation_type, 1)
+            delay_needed = self.operation_delays.get(operation_type, 0.1)  # 减少到0.1秒
             time_since_last = current_time - last_time
             
-            # 进一步最小化等待时间
             if time_since_last < delay_needed:
-                sleep_time = max(0.01, delay_needed - time_since_last)  # 最少等待0.01秒
+                sleep_time = max(0.01, delay_needed - time_since_last)
                 logging.debug(f"操作 {operation_type} 间隔控制，等待 {sleep_time:.3f} 秒")
                 await asyncio.sleep(sleep_time)
         
@@ -167,10 +188,21 @@ class FloodWaitManager:
         self.last_operation_time[key] = time.time()
     
     def set_flood_wait(self, operation_type, wait_time, user_id=None):
-        """设置FloodWait等待时间，但限制最大值（已修复）"""
-        # 限制最大等待时间为60秒，防止异常的长等待时间
-        MAX_WAIT_TIME = 60
-        safe_wait_time = min(wait_time, MAX_WAIT_TIME)
+        """设置FloodWait等待时间，智能处理异常时间"""
+        # 智能检测异常时间
+        if wait_time > 300:  # 超过5分钟，可能是异常
+            logging.warning(f"🚨 检测到极异常的FloodWait时间: {wait_time}秒，可能是Telegram API错误")
+            # 对于极异常时间，使用更保守的限制
+            safe_wait_time = min(30, wait_time // 10)  # 最多30秒
+        elif wait_time > 120:  # 超过2分钟，可能是异常
+            logging.warning(f"⚠️ 检测到异常的FloodWait时间: {wait_time}秒，已自动限制为60秒")
+            safe_wait_time = 60
+        elif wait_time > 60:  # 超过1分钟，可能是异常
+            logging.warning(f"⚠️ 检测到较长的FloodWait时间: {wait_time}秒，已自动限制为60秒")
+            safe_wait_time = 60
+        else:
+            # 正常时间范围，直接使用
+            safe_wait_time = wait_time
         
         # 不再记录用户级限制，只记录全局限制
         if not user_id or user_id == 'unknown':
@@ -178,10 +210,9 @@ class FloodWaitManager:
             wait_until = time.time() + safe_wait_time
             self.flood_wait_times[key] = wait_until
             
-            # 记录原始时间和调整后的时间
+            # 记录调整信息
             if safe_wait_time != wait_time:
-                logging.warning(f"⚠️ 检测到异常的FloodWait时间: {wait_time}秒，已自动限制为{safe_wait_time}秒")
-                logging.warning(f"⚠️ 操作类型: {operation_type}，原始限制: {wait_time}秒，安全限制: {safe_wait_time}秒")
+                logging.warning(f"🔄 FloodWait时间调整: {operation_type} 从 {wait_time}秒 调整为 {safe_wait_time}秒")
             
             # 格式化等待时间
             if safe_wait_time >= 60:
@@ -189,7 +220,7 @@ class FloodWaitManager:
             else:
                 time_str = f"{safe_wait_time}秒"
             
-            logging.warning(f"全局操作 {operation_type} 遇到FloodWait限制，需要等待 {time_str} (安全限制: {safe_wait_time}秒)")
+            logging.info(f"📝 全局操作 {operation_type} 设置等待时间: {time_str}")
         else:
             # 用户级限制只记录日志，不阻止操作
             logging.info(f"用户 {user_id} 的操作 {operation_type} 遇到限制，但已移除阻止机制")
@@ -1627,9 +1658,9 @@ def remove_task(user_id, task_id):
 
 @monitor_performance('safe_edit_or_reply')
 async def safe_edit_or_reply(message, text, reply_markup=None, user_id=None):
-    """安全的编辑或回复消息，包含FloodWait保护"""
+    """安全的编辑或回复消息，智能处理FloodWait"""
     try:
-        # 检查是否需要等待（已移除用户级限制）
+        # 智能检查FloodWait限制
         await flood_wait_manager.wait_if_needed('edit_message')
         
         # 尝试编辑消息
@@ -1637,28 +1668,31 @@ async def safe_edit_or_reply(message, text, reply_markup=None, user_id=None):
         return True
         
     except FloodWait as e:
-        # 记录全局FloodWait限制（不再记录用户级限制）
+        # 智能处理FloodWait
         wait_time = e.value
         
-        # 只记录全局限制，不阻止用户操作
+        # 记录并智能调整限制
         flood_wait_manager.set_flood_wait('edit_message', wait_time)
         
-        logging.info(f"全局操作 edit_message 遇到FloodWait限制，需要等待 {wait_time} 秒")
+        logging.info(f"📝 操作 edit_message 遇到FloodWait: {wait_time}秒")
         
-        # 如果等待时间过长（超过5分钟），直接回复新消息
-        if wait_time > 300:
-            logging.info(f"等待时间过长({wait_time}秒)，改为发送新消息")
+        # 智能等待策略
+        if wait_time > 300:  # 超过5分钟，直接发送新消息
+            logging.info(f"🚨 等待时间过长({wait_time}秒)，改为发送新消息")
             try:
                 await flood_wait_manager.wait_if_needed('send_message')
                 await message.reply_text(text, reply_markup=reply_markup)
                 return True
             except Exception as reply_e:
-                logging.error(f"发送新消息也失败: {reply_e}")
+                logging.error(f"发送新消息失败: {reply_e}")
                 return False
-        
-        # 等待指定时间后重试
-        logging.info(f"等待 {wait_time} 秒后重试...")
-        await asyncio.sleep(wait_time)
+        elif wait_time > 60:  # 超过1分钟，使用智能等待
+            safe_wait = min(30, wait_time // 2)  # 最多等待30秒
+            logging.info(f"🔄 智能等待: 原始{wait_time}秒，实际{safe_wait}秒")
+            await asyncio.sleep(safe_wait)
+        else:
+            # 正常等待
+            await asyncio.sleep(wait_time)
         
         # 重试编辑
         try:
@@ -1666,7 +1700,7 @@ async def safe_edit_or_reply(message, text, reply_markup=None, user_id=None):
             return True
         except Exception as retry_e:
             logging.error(f"重试编辑失败: {retry_e}")
-            # 最后尝试发送新消息
+            # 发送新消息
             try:
                 await message.reply_text(text, reply_markup=reply_markup)
                 return True
@@ -2395,6 +2429,64 @@ async def debug_command(client, message):
             debug_text += "• 没有启用监听的频道组\n"
     
     await message.reply(debug_text)
+
+# FloodWait测试命令
+@app.on_message(filters.command("testfloodwait") & filters.private)
+async def test_floodwait_system(message):
+    """测试FloodWait系统"""
+    user_id = message.from_user.id
+    
+    if not is_admin_user(user_id):
+        await message.reply_text("❌ 只有管理员可以使用此命令")
+        return
+    
+    # 显示FloodWait系统状态
+    health = flood_wait_manager.get_health_status()
+    all_status = flood_wait_manager.get_all_flood_wait_status()
+    
+    status_text = f"🧪 **FloodWait系统测试**\n\n"
+    status_text += f"**系统健康状态**:\n"
+    status_text += f"• 总限制数: {health['total_restrictions']}\n"
+    status_text += f"• 异常限制: {health['abnormal_restrictions']}\n"
+    status_text += f"• 正常限制: {health['normal_restrictions']}\n\n"
+    
+    if all_status:
+        status_text += "**当前限制详情**:\n"
+        for key, info in all_status.items():
+            status_text += f"• {info['operation_type']}: {info['remaining_formatted']}\n"
+    else:
+        status_text += "✅ **当前无FloodWait限制**\n"
+    
+    status_text += f"\n**智能处理策略**:\n"
+    status_text += f"• 极异常时间(>5分钟): 直接清除\n"
+    status_text += f"• 异常时间(>2分钟): 限制为60秒\n"
+    status_text += f"• 较长时间(>1分钟): 智能调整\n"
+    status_text += f"• 正常时间: 保持原样\n"
+    
+    await message.reply_text(status_text)
+
+# 模拟FloodWait测试
+@app.on_message(filters.command("simulatefloodwait") & filters.private)
+async def simulate_floodwait_test(message):
+    """模拟FloodWait测试"""
+    user_id = message.from_user.id
+    
+    if not is_admin_user(user_id):
+        await message.reply_text("❌ 只有管理员可以使用此命令")
+        return
+    
+    # 模拟设置一个异常的FloodWait时间
+    test_wait_time = 180  # 3分钟
+    flood_wait_manager.set_flood_wait('test_operation', test_wait_time)
+    
+    await message.reply_text(
+        f"🧪 **FloodWait模拟测试**\n\n"
+        f"已设置测试限制:\n"
+        f"• 操作类型: test_operation\n"
+        f"• 等待时间: {test_wait_time}秒\n\n"
+        f"使用 /testfloodwait 查看系统如何处理\n"
+        f"使用 /fixfloodwait 立即修复"
+    )
 
 # 登录测试命令
 @app.on_message(filters.command("testlogin") & filters.private)
