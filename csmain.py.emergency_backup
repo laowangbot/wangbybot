@@ -849,8 +849,9 @@ async def handle_username_input(message):
             f"❌ **格式错误**\n\n"
             f"请使用正确格式：`用户名:密码`\n"
             f"例如：`demo:demo123`\n\n"
-            "请重新使用 /start 命令开始登录："
+            f"请重新输入："
         )
+        pending_logins[user_id] = {"waiting_for_username": True}
         return
     
     try:
@@ -861,8 +862,9 @@ async def handle_username_input(message):
         await message.reply_text(
             f"❌ **格式错误**\n\n"
             f"请使用正确格式：`用户名:密码`\n"
-            "请重新使用 /start 命令开始登录："
+            f"请重新输入："
         )
+        pending_logins[user_id] = {"waiting_for_username": True}
         return
     
     # 验证用户名和密码
@@ -898,8 +900,12 @@ async def handle_username_input(message):
                 f"❌ **登录失败**\n\n"
                 f"用户名或密码错误。\n"
                 f"剩余尝试次数：{remaining_attempts}\n\n"
-                "请重新使用 /start 命令开始登录："
+                f"请重新输入（格式：`用户名:密码`）："
             )
+            
+            if remaining_attempts > 0:
+                # 重新显示登录界面
+                pending_logins[user_id] = {"waiting_for_username": True}
 
 def require_login(func):
     """登录装饰器 - 要求用户必须登录才能访问功能"""
@@ -2343,17 +2349,11 @@ async def start_command(client, message):
     user_id = message.from_user.id
     logging.info(f"用户 {user_id} 启动机器人。")
     
-    # 清理之前的登录状态，避免重复
-    if user_id in pending_logins:
-        del pending_logins[user_id]
-        logging.info(f"清理用户 {user_id} 的重复登录状态")
-    
     # 检查登录状态
     if not is_user_logged_in(user_id):
-        # 避免重复显示登录界面
-        if user_id not in pending_logins:
-            await show_login_screen(message)
+        await show_login_screen(message)
         return
+    
     # 更新用户活动时间
     update_user_activity(user_id)
     
@@ -2404,29 +2404,6 @@ async def history_command(client, message):
     await view_history(message, message.from_user.id)
 
 @app.on_message(filters.command("debug") & filters.private)
-
-
-@app.on_message(filters.command("resetlogin") & filters.private)
-async def reset_login_command(client, message):
-    """重置用户登录状态，解决重复登录问题"""
-    user_id = message.from_user.id
-    
-    # 清理登录状态
-    if user_id in pending_logins:
-        del pending_logins[user_id]
-        logging.info(f"用户 {user_id} 重置登录状态")
-    
-    # 清理登录尝试记录
-    user_id_str = str(user_id)
-    if user_id_str in login_attempts:
-        del login_attempts[user_id_str]
-        logging.info(f"用户 {user_id} 清理登录尝试记录")
-    
-    await message.reply_text(
-        "🔄 **登录状态已重置**\n\n"
-        "您的登录状态已被清理，现在可以重新使用 /start 命令开始登录。\n\n"
-        "如果遇到重复登录问题，请使用此命令重置。"
-    )
 async def debug_command(client, message):
     user_id = message.from_user.id
     if not is_user_logged_in(user_id):
@@ -3177,12 +3154,6 @@ async def floodwait_status_command(client, message):
 async def handle_text_input(client, message):
     user_id = message.from_user.id
     
-    # 防止重复处理 - 添加消息ID检查
-    message_id = message.id
-    if hasattr(message, '_processed') and message._processed:
-        return
-    message._processed = True
-    
     # 检查是否正在等待用户名输入
     if user_id in pending_logins and pending_logins[user_id].get("waiting_for_username"):
         await handle_username_input(message)
@@ -3190,9 +3161,7 @@ async def handle_text_input(client, message):
     
     # 检查登录状态
     if not is_user_logged_in(user_id):
-        # 避免重复显示登录界面
-        if user_id not in pending_logins:
-            await show_login_screen(message)
+        await show_login_screen(message)
         return
     
     # 更新用户活动时间
