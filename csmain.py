@@ -1372,38 +1372,81 @@ async def cooperative_sleep(task_obj: dict, seconds: int):
 # ==================== 持久化函数 ====================
 def save_configs():
     """将用户配置保存到文件"""
-    config_file = f"user_configs_{bot_config['bot_id']}.json"
-    with open(config_file, "w", encoding='utf-8') as f:
-        json.dump(user_configs, f, ensure_ascii=False, indent=4)
-    logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到 {config_file}。")
+    config_file = get_config_path(f"user_configs_{bot_config['bot_id']}.json")
+    try:
+        with open(config_file, "w", encoding='utf-8') as f:
+            json.dump(user_configs, f, ensure_ascii=False, indent=4)
+        logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到 {config_file}。")
+    except Exception as e:
+        logging.error(f"[{bot_config['bot_id']}] 保存用户配置失败: {e}")
+        # 尝试保存到当前目录作为备份
+        backup_file = f"user_configs_{bot_config['bot_id']}.json"
+        try:
+            with open(backup_file, "w", encoding='utf-8') as f:
+                json.dump(user_configs, f, ensure_ascii=False, indent=4)
+            logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到备份文件 {backup_file}。")
+        except Exception as backup_e:
+            logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")
 
 def load_configs():
     """从文件载入用户配置"""
     global user_configs
-    config_file = f"user_configs_{bot_config['bot_id']}.json"
+    config_file = get_config_path(f"user_configs_{bot_config['bot_id']}.json")
+    backup_file = f"user_configs_{bot_config['bot_id']}.json"
+    
+    # 首先尝试从持久化存储加载
     if os.path.exists(config_file):
-        with open(config_file, "r", encoding="utf-8") as f:
-            user_configs = json.load(f)
-        logging.info(f"[{bot_config['bot_id']}] 用户配置已从 {config_file} 载入。")
-    else:
-        logging.info(f"[{bot_config['bot_id']}] 配置文件 {config_file} 不存在，将创建新配置。")
-        user_configs = {}
+        try:
+            with open(config_file, "r", encoding='utf-8') as f:
+                user_configs = json.load(f)
+            logging.info(f"[{bot_config['bot_id']}] 用户配置已从持久化存储 {config_file} 载入。")
+            return
+        except Exception as e:
+            logging.error(f"[{bot_config['bot_id']}] 从持久化存储加载配置失败: {e}")
+    
+    # 如果持久化存储失败，尝试从备份文件加载
+    if os.path.exists(backup_file):
+        try:
+            with open(backup_file, "r", encoding='utf-8') as f:
+                user_configs = json.load(f)
+            logging.info(f"[{bot_config['bot_id']}] 用户配置已从备份文件 {backup_file} 载入。")
+            # 尝试保存到持久化存储
+            try:
+                save_configs()
+                logging.info(f"[{bot_config['bot_id']}] 配置已迁移到持久化存储。")
+            except Exception as migrate_e:
+                logging.error(f"[{bot_config['bot_id']}] 迁移到持久化存储失败: {migrate_e}")
+            return
+        except Exception as e:
+            logging.error(f"[{bot_config['bot_id']}] 从备份文件加载配置失败: {e}")
+    
+    # 如果都失败，创建新配置
+    logging.info(f"[{bot_config['bot_id']}] 配置文件不存在，将创建新配置。")
+    user_configs = {}
 
 def save_user_states():
     """将用户状态保存到文件"""
     try:
-        config_file = f"user_states_{bot_config['bot_id']}.json"
+        config_file = get_config_path(f"user_states_{bot_config['bot_id']}.json")
         with open(config_file, "w", encoding='utf-8') as f:
             json.dump(user_states, f, ensure_ascii=False, indent=4)
         logging.info(f"[{bot_config['bot_id']}] 用户状态已保存到 {config_file}。")
     except Exception as e:
         logging.error(f"[{bot_config['bot_id']}] 保存用户状态失败: {e}")
+        # 尝试保存到当前目录作为备份
+        backup_file = f"user_states_{bot_config['bot_id']}.json"
+        try:
+            with open(backup_file, "w", encoding='utf-8') as f:
+                json.dump(user_states, f, ensure_ascii=False, indent=4)
+            logging.info(f"[{bot_config['bot_id']}] 用户状态已保存到备份文件 {backup_file}。")
+        except Exception as backup_e:
+            logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")
 
 def load_user_states():
     """从文件载入用户状态"""
     global user_states
     try:
-        config_file = f"user_states_{bot_config['bot_id']}.json"
+        config_file = get_config_path(f"user_states_{bot_config['bot_id']}.json")
         if os.path.exists(config_file):
             with open(config_file, "r", encoding="utf-8") as f:
                 user_states = json.load(f)
@@ -1417,19 +1460,57 @@ def load_user_states():
 
 def save_history():
     """将历史记录保存到文件"""
-    config_file = f"user_history_{bot_config['bot_id']}.json"
-    with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(user_history, f, ensure_ascii=False, indent=4)
-    logging.info(f"[{bot_config['bot_id']}] 历史记录已保存到 {config_file}。")
+    config_file = get_config_path(f"user_history_{bot_config['bot_id']}.json")
+    try:
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(user_history, f, ensure_ascii=False, indent=4)
+        logging.info(f"[{bot_config['bot_id']}] 历史记录已保存到 {config_file}。")
+    except Exception as e:
+        logging.error(f"[{bot_config['bot_id']}] 保存历史记录失败: {e}")
+        # 尝试保存到当前目录作为备份
+        backup_file = f"user_history_{bot_config['bot_id']}.json"
+        try:
+            with open(backup_file, "w", encoding='utf-8') as f:
+                json.dump(user_history, f, ensure_ascii=False, indent=4)
+            logging.info(f"[{bot_config['bot_id']}] 历史记录已保存到备份文件 {backup_file}。")
+        except Exception as backup_e:
+            logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")
 
 def load_history():
     """从文件载入历史记录"""
     global user_history
-    config_file = f"user_history_{bot_config['bot_id']}.json"
+    config_file = get_config_path(f"user_history_{bot_config['bot_id']}.json")
+    backup_file = f"user_history_{bot_config['bot_id']}.json"
+    
+    # 首先尝试从持久化存储加载
     if os.path.exists(config_file):
-        with open(config_file, "r", encoding="utf-8") as f:
-            user_history = json.load(f)
-        logging.info(f"[{bot_config['bot_id']}] 历史记录已载入。")
+        try:
+            with open(config_file, "r", encoding='utf-8') as f:
+                user_history = json.load(f)
+            logging.info(f"[{bot_config['bot_id']}] 历史记录已从持久化存储 {config_file} 载入。")
+            return
+        except Exception as e:
+            logging.error(f"[{bot_config['bot_id']}] 从持久化存储加载历史记录失败: {e}")
+    
+    # 如果持久化存储失败，尝试从备份文件加载
+    if os.path.exists(backup_file):
+        try:
+            with open(backup_file, "r", encoding='utf-8') as f:
+                user_history = json.load(f)
+            logging.info(f"[{bot_config['bot_id']}] 历史记录已从备份文件 {backup_file} 载入。")
+            # 尝试保存到持久化存储
+            try:
+                save_history()
+                logging.info(f"[{bot_config['bot_id']}] 历史记录已迁移到持久化存储。")
+            except Exception as migrate_e:
+                logging.error(f"[{bot_config['bot_id']}] 迁移到持久化存储失败: {migrate_e}")
+            return
+        except Exception as e:
+            logging.error(f"[{bot_config['bot_id']}] 从备份文件加载历史记录失败: {e}")
+    
+    # 如果都失败，创建新历史记录
+    user_history = {}
+    logging.info(f"[{bot_config['bot_id']}] 历史记录文件不存在，将创建新记录。")
 
 # ==================== 按钮设置 ====================
 def get_main_menu_buttons(user_id):
@@ -2427,6 +2508,58 @@ async def reset_login_command(client, message):
         "您的登录状态已被清理，现在可以重新使用 /start 命令开始登录。\n\n"
         "如果遇到重复登录问题，请使用此命令重置。"
     )
+
+@app.on_message(filters.command("configstatus") & filters.private)
+async def config_status_command(client, message):
+    """检查配置保存状态"""
+    user_id = message.from_user.id
+    if not is_user_logged_in(user_id):
+        await message.reply("请先登录后再使用此命令。")
+        return
+    
+    # 检查各种配置文件的状态
+    status_text = "🔍 **配置保存状态检查**\n\n"
+    
+    # 检查持久化存储路径
+    persistent_path = get_config_path("")
+    status_text += f"📁 **持久化存储路径**: {persistent_path}\n"
+    
+    # 检查各种配置文件
+    config_files = [
+        f"user_configs_{bot_config['bot_id']}.json",
+        f"user_states_{bot_config['bot_id']}.json", 
+        f"user_history_{bot_config['bot_id']}.json",
+        f"user_login_{bot_config['bot_id']}.json"
+    ]
+    
+    for filename in config_files:
+        persistent_file = get_config_path(filename)
+        backup_file = filename
+        
+        persistent_exists = os.path.exists(persistent_file)
+        backup_exists = os.path.exists(backup_file)
+        
+        if persistent_exists:
+            status_text += f"✅ {filename} - 持久化存储\n"
+        elif backup_exists:
+            status_text += f"⚠️ {filename} - 仅备份文件\n"
+        else:
+            status_text += f"❌ {filename} - 不存在\n"
+    
+    # 检查内存中的配置
+    status_text += f"\n💾 **内存配置状态**:\n"
+    status_text += f"• 用户配置: {len(user_configs)} 个用户\n"
+    status_text += f"• 用户状态: {len(user_states)} 个用户\n"
+    status_text += f"• 历史记录: {len(user_history)} 个用户\n"
+    status_text += f"• 登录用户: {len(logged_in_users)} 个\n"
+    
+    # 添加修复按钮
+    buttons = [
+        [InlineKeyboardButton("🔄 强制保存配置", callback_data="force_save_configs")],
+        [InlineKeyboardButton("🔍 查看详细状态", callback_data="view_detailed_config_status")]
+    ]
+    
+    await message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(buttons))
 async def debug_command(client, message):
     user_id = message.from_user.id
     if not is_user_logged_in(user_id):
@@ -2818,6 +2951,10 @@ async def callback_handler(client, callback_query):
         await clear_user_history(callback_query.message, user_id)
     elif data == "show_help":
         await show_help(callback_query.message, user_id)
+    elif data == "force_save_configs":
+        await force_save_configs(callback_query.message, user_id)
+    elif data == "view_detailed_config_status":
+        await view_detailed_config_status(callback_query.message, user_id)
     elif data == "view_tasks":
         await view_tasks(callback_query.message, user_id)
     elif data.startswith("resume:"):
@@ -3530,6 +3667,132 @@ async def listen_and_clone(client, message):
 # ==================== 菜单函数 ====================
 async def show_help(message, user_id):
     await safe_edit_or_reply(message, HELP_TEXT, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")]]))
+
+async def force_save_configs(message, user_id):
+    """强制保存所有配置"""
+    try:
+        # 保存所有配置
+        save_configs()
+        save_user_states()
+        save_history()
+        save_running_tasks()
+        
+        # 检查保存结果
+        status_text = "🔄 **强制保存配置完成**\n\n"
+        
+        # 检查持久化存储
+        persistent_path = get_config_path("")
+        status_text += f"📁 **持久化存储路径**: {persistent_path}\n"
+        
+        # 检查各种配置文件
+        config_files = [
+            f"user_configs_{bot_config['bot_id']}.json",
+            f"user_states_{bot_config['bot_id']}.json", 
+            f"user_history_{bot_config['bot_id']}.json"
+        ]
+        
+        for filename in config_files:
+            persistent_file = get_config_path(filename)
+            if os.path.exists(persistent_file):
+                file_size = os.path.getsize(persistent_file)
+                status_text += f"✅ {filename} - 已保存 ({file_size} 字节)\n"
+            else:
+                status_text += f"❌ {filename} - 保存失败\n"
+        
+        status_text += f"\n💾 **内存配置状态**:\n"
+        status_text += f"• 用户配置: {len(user_configs)} 个用户\n"
+        status_text += f"• 用户状态: {len(user_states)} 个用户\n"
+        status_text += f"• 历史记录: {len(user_history)} 个用户\n"
+        
+        buttons = [
+            [InlineKeyboardButton("🔍 再次检查状态", callback_data="configstatus")],
+            [InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")]
+        ]
+        
+        await safe_edit_or_reply(message, status_text, reply_markup=InlineKeyboardMarkup(buttons))
+        
+    except Exception as e:
+        logging.error(f"强制保存配置失败: {e}")
+        await safe_edit_or_reply(message, f"❌ 强制保存配置失败: {str(e)}")
+
+async def view_detailed_config_status(message, user_id):
+    """查看详细的配置状态"""
+    try:
+        status_text = "🔍 **详细配置状态**\n\n"
+        
+        # 检查持久化存储路径
+        persistent_path = get_config_path("")
+        status_text += f"📁 **持久化存储路径**: {persistent_path}\n"
+        status_text += f"📁 **当前工作目录**: {os.getcwd()}\n"
+        status_text += f"🌍 **环境变量**: RENDER={'true' if os.getenv('RENDER') == 'true' else 'false'}\n\n"
+        
+        # 检查各种配置文件
+        config_files = [
+            f"user_configs_{bot_config['bot_id']}.json",
+            f"user_states_{bot_config['bot_id']}.json", 
+            f"user_history_{bot_config['bot_id']}.json",
+            f"user_login_{bot_config['bot_id']}.json"
+        ]
+        
+        for filename in config_files:
+            persistent_file = get_config_path(filename)
+            backup_file = filename
+            
+            persistent_exists = os.path.exists(persistent_file)
+            backup_exists = os.path.exists(backup_file)
+            
+            if persistent_exists:
+                file_size = os.path.getsize(persistent_file)
+                status_text += f"✅ {filename} - 持久化存储 ({file_size} 字节)\n"
+            elif backup_exists:
+                file_size = os.path.getsize(backup_file)
+                status_text += f"⚠️ {filename} - 仅备份文件 ({file_size} 字节)\n"
+            else:
+                status_text += f"❌ {filename} - 不存在\n"
+        
+        # 检查内存中的配置详情
+        status_text += f"\n💾 **内存配置详情**:\n"
+        
+        # 用户配置详情
+        user_config_count = len(user_configs)
+        status_text += f"• 用户配置: {user_config_count} 个用户\n"
+        if user_config_count > 0:
+            for uid, cfg in list(user_configs.items())[:3]:  # 只显示前3个
+                channel_pairs = cfg.get("channel_pairs", [])
+                status_text += f"  - 用户 {uid}: {len(channel_pairs)} 个频道组\n"
+        
+        # 用户状态详情
+        user_states_count = len(user_states)
+        status_text += f"• 用户状态: {user_states_count} 个用户\n"
+        if user_states_count > 0:
+            for uid, states in list(user_states.items())[:3]:  # 只显示前3个
+                status_text += f"  - 用户 {uid}: {len(states)} 个状态\n"
+        
+        # 历史记录详情
+        history_count = len(user_history)
+        status_text += f"• 历史记录: {history_count} 个用户\n"
+        if history_count > 0:
+            for uid, history in list(user_history.items())[:3]:  # 只显示前3个
+                status_text += f"  - 用户 {uid}: {len(history)} 条记录\n"
+        
+        # 登录用户详情
+        login_count = len(logged_in_users)
+        status_text += f"• 登录用户: {login_count} 个\n"
+        if login_count > 0:
+            for uid, username in list(logged_in_users.items())[:3]:  # 只显示前3个
+                status_text += f"  - 用户 {uid}: {username}\n"
+        
+        buttons = [
+            [InlineKeyboardButton("🔄 强制保存配置", callback_data="force_save_configs")],
+            [InlineKeyboardButton("🔍 检查状态", callback_data="configstatus")],
+            [InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")]
+        ]
+        
+        await safe_edit_or_reply(message, status_text, reply_markup=InlineKeyboardMarkup(buttons))
+        
+    except Exception as e:
+        logging.error(f"查看详细配置状态失败: {e}")
+        await safe_edit_or_reply(message, f"❌ 查看详细配置状态失败: {str(e)}")
 
 async def show_manage_filter_buttons_menu(message, user_id):
     config = user_configs.get(str(user_id), {})
