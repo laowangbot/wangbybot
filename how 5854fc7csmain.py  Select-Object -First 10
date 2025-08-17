@@ -1,0 +1,10 @@
+[33md252d2c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m 修复login_data变量未定义错误：将变量定义移到函数开头，确保内存存储和文件存储都能正常工作
+[33m033e940[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m 改进用户配置保存和登录系统：延长会话超时时间到1年，添加自动保存配置线程，确保用户配置和登录状态持久保存
+[33m09dc6d6[m 修复processed_messages变量作用域问题：在handle_text_input函数中添加global声明
+[33m499be1e[m 修复processed_messages变量未定义错误：在全局状态区域添加缺失的变量定义
+[33m5854fc7[m 修复bot_id未定义错误：将HTML模板中的{bot_id}替换为{bot_config['bot_id']}
+[33m371cecd[m  完全修复FloodWaitManager类 - 解决所有语法错误，清理重复代码，优化异常时间处理，改进智能等待策略
+[33mca2af4c[m  紧急修复FloodWait异常时间和按钮失效问题 - 更激进的异常时间处理，智能等待策略，新增/emergency紧急重置命令
+[33m077f4e9[m  集成内存存储管理器 - 解决Render持久化问题，添加GitHub备份功能，新增/backup、/restore、/storage命令
+[33mfbd9d1b[m  修复配置自动保存问题 - 为所有配置更改操作添加自动保存功能，确保用户状态、关键字、替换规则等配置更改后立即保存到持久化存储
+[33mb8f375a[m  修复f-string语法错误 - 解决user_login配置文件路径中的方括号问题，确保代码可以正常编译
