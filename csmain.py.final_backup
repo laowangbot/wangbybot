@@ -3332,7 +3332,7 @@ async def floodwait_status_command(client, message):
 async def handle_text_input(client, message):
     user_id = message.from_user.id
     
-    # 防止重复处理 - 使用更强大的去重机制
+    # 防止重复处理 - 使用全局消息ID检查
     message_id = message.id
     current_time = time.time()
     
@@ -3341,18 +3341,16 @@ async def handle_text_input(client, message):
     
     # 检查是否已经处理过
     if process_key in processed_messages:
-        logging.info(f"消息 {message_id} 已被处理，跳过")
         return
     
-    # 清理过期的处理记录（3分钟前的）
+    # 清理过期的处理记录（5分钟前的）
     expired_keys = [k for k, v in processed_messages.items() 
-                    if current_time - v > 180]
+                    if current_time - v > 300]
     for k in expired_keys:
         del processed_messages[k]
     
     # 标记为已处理
     processed_messages[process_key] = current_time
-    logging.info(f"标记消息 {message_id} 为已处理")
     
     # 检查是否正在等待用户名输入
     if user_id in pending_logins and pending_logins[user_id].get("waiting_for_username"):
