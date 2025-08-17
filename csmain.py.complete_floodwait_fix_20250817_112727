@@ -146,10 +146,52 @@ class FloodWaitManager:
             'send_media_group': 0.5, # 发送媒体组间隔0.5秒
         }
     
-    async def wait_if_needed(self, operation_type, user_id=None):
+        async def wait_if_needed(self, operation_type, user_id=None):
         """检查是否需要等待，智能处理FloodWait限制"""
         current_time = time.time()
         key = f"{operation_type}_{user_id}" if user_id else operation_type
+        
+        # 检查FloodWait限制 - 只影响机器人API调用，不影响用户操作
+        if operation_type in self.flood_wait_times:
+            wait_until = self.flood_wait_times[operation_type]
+            remaining = wait_until - current_time
+            
+            if remaining > 0:
+                # 智能等待策略 - 只等待必要的API操作
+                if operation_type in ['send_message', 'edit_message', 'delete_message']:
+                    # 这些是机器人API调用，需要等待
+                    if remaining > 60:  # 超过1分钟，使用更激进的策略
+                        safe_wait = min(30, remaining // 2)  # 最多等待30秒
+                        logging.info(f"🔄 API调用等待: {operation_type} 原始等待 {remaining:.1f}秒，实际等待 {safe_wait}秒")
+                        await asyncio.sleep(safe_wait)
+                        # 清除过长的限制
+                        if remaining > 120:
+                            del self.flood_wait_times[operation_type]
+                            logging.info(f"🧹 清除过长的FloodWait限制: {operation_type}")
+                    else:
+                        # 正常等待
+                        logging.info(f"⏳ API调用等待: {operation_type} 剩余 {remaining:.1f}秒")
+                        await asyncio.sleep(remaining)
+                        # 清除已完成的限制
+                        del self.flood_wait_times[operation_type]
+                else:
+                    # 非API调用操作，不等待，直接清除限制
+                    logging.info(f"🧹 非API操作，清除FloodWait限制: {operation_type}")
+                    del self.flood_wait_times[operation_type]
+        
+        # 基本的操作间隔控制（最小化）- 只针对API调用
+        if key in self.last_operation_time and operation_type in ['send_message', 'edit_message', 'delete_message']:
+            last_time = self.last_operation_time[key]
+            delay_needed = self.operation_delays.get(operation_type, 0.1)  # 减少到0.1秒
+            time_since_last = current_time - last_time
+            
+            if time_since_last < delay_needed:
+                sleep_time = max(0.01, delay_needed - time_since_last)
+                logging.debug(f"API操作间隔控制: {operation_type} 等待 {sleep_time:.3f} 秒")
+                await asyncio.sleep(sleep_time)
+        
+        # 更新最后操作时间
+        self.last_operation_time[key] = time.time()_{user_id}" if user_id else operation_type
         
         # 检查FloodWait限制 - 只影响机器人API调用，不影响用户操作
         if operation_type in self.flood_wait_times:
@@ -198,13 +240,49 @@ class FloodWaitManager:
         api_operations = ['send_message', 'edit_message', 'delete_message', 'forward_message', 'copy_message']
         return operation_type in api_operations
     
-    def set_flood_wait(self, operation_type, wait_time, user_id=None):
+        def set_flood_wait(self, operation_type, wait_time, user_id=None):
         """设置FloodWait等待时间，智能处理异常时间"""
         # 智能检测异常时间
         if wait_time > 300:  # 超过5分钟，可能是异常
             logging.warning(f"🚨 检测到极异常的FloodWait时间: {wait_time}秒，可能是Telegram API错误")
             # 对于极异常时间，直接限制为30秒
             safe_wait_time = 30
+        elif wait_time > 120:  # 超过2分钟，可能是异常
+            logging.warning(f"⚠️ 检测到异常的FloodWait时间: {wait_time}秒，已自动限制为60秒")
+            safe_wait_time = 60
+        elif wait_time > 60:  # 超过1分钟，可能是异常
+            logging.warning(f"⚠️ 检测到较长的FloodWait时间: {wait_time}秒，已自动限制为60秒")
+            safe_wait_time = 60
+        else:
+            # 正常时间范围，直接使用
+            safe_wait_time = wait_time
+        
+        # 只记录API调用的FloodWait限制，不影响用户操作
+        if self.is_api_operation(operation_type):
+            if not user_id or user_id == 'unknown':
+                key = operation_type
+                wait_until = time.time() + safe_wait_time
+                self.flood_wait_times[key] = wait_until
+                
+                # 记录调整信息
+                if safe_wait_time != wait_time:
+                    logging.warning(f"🔄 API调用FloodWait调整: {operation_type} 从 {wait_time}秒 调整为 {safe_wait_time}秒")
+                
+                # 格式化等待时间
+                if safe_wait_time >= 60:
+                    time_str = f"{safe_wait_time // 60}分钟{safe_wait_time % 60}秒"
+                else:
+                    time_str = f"{safe_wait_time}秒"
+                
+                logging.info(f"📝 API调用 {operation_type} 设置等待时间: {time_str}")
+            else:
+                # 用户级API限制只记录日志，不阻止操作
+                logging.info(f"用户 {user_id} 的API调用 {operation_type} 遇到限制，但已移除阻止机制")
+        else:
+            # 非API操作，不记录FloodWait限制
+            logging.info(f"非API操作 {operation_type}，不记录FloodWait限制")秒，可能是Telegram API错误")
+            # 对于极异常时间，使用更保守的限制
+            safe_wait_time = min(30, wait_time // 10)  # 最多30秒
         elif wait_time > 120:  # 超过2分钟，可能是异常
             logging.warning(f"⚠️ 检测到异常的FloodWait时间: {wait_time}秒，已自动限制为60秒")
             safe_wait_time = 60
@@ -363,6 +441,62 @@ class FloodWaitManager:
         if recovered_count > 0 or expired_count > 0:
             logging.info(f"🧹 API调用FloodWait自动恢复: 修复 {recovered_count} 个异常限制，清理 {expired_count} 个过期记录")
         
+        return recovered_count, expired_count 剩余 {wait_until - current_time:.1f}秒")
+                operations_to_remove.append(operation_type)
+                continue
+            
+            # 如果等待时间超过2分钟，限制为60秒
+            if current_time < wait_until and (wait_until - current_time) > 120:
+                logging.warning(f"🔄 自动限制异常FloodWait: {operation_type} 从 {original_time}秒 限制为 60秒")
+                status["wait_until"] = current_time + 60
+                status["wait_time"] = 60
+                continue
+            
+            # 如果等待时间超过1分钟，限制为60秒
+            if current_time < wait_until and (wait_until - current_time) > 60:
+                logging.info(f"🔄 自动调整FloodWait: {operation_type} 从 {original_time}秒 限制为 60秒")
+                status["wait_until"] = current_time + 60
+                status["wait_time"] = 60
+                continue
+        
+        # 移除需要清除的操作
+        for operation_type in operations_to_remove:
+            del self.flood_wait_status[operation_type]
+        
+        # 清理过期的限制
+        self.clear_expired_flood_wait()")
+                continue
+            
+            if remaining <= 0:
+                # 已过期的限制
+                del self.flood_wait_times[key]
+                expired_count += 1
+                logging.debug(f"清理过期的API调用FloodWait限制: {key}")
+            elif remaining > 300:  # 超过5分钟，极异常
+                # 极异常限制，直接清除
+                del self.flood_wait_times[key]
+                recovered_count += 1
+                logging.warning(f"🚨 清除极异常的API调用FloodWait限制: {key}，剩余时间: {remaining}秒")
+            elif remaining > 120:  # 超过2分钟，异常
+                # 异常限制，限制为60秒
+                new_wait_until = current_time + 60
+                self.flood_wait_times[key] = new_wait_until
+                recovered_count += 1
+                logging.warning(f"⚠️ 修复异常的API调用FloodWait限制: {key}，从 {remaining}秒 调整为 60秒")
+            elif remaining > 60:  # 超过1分钟，可能异常
+                # 可能异常，限制为原时间的一半
+                new_wait_time = min(60, remaining // 2)
+                new_wait_until = current_time + new_wait_time
+                self.flood_wait_times[key] = new_wait_until
+                recovered_count += 1
+                logging.info(f"🔄 调整较长的API调用FloodWait限制: {key}，从 {remaining}秒 调整为 {new_wait_time}秒")
+        
+        # 清理过期的记录
+        expired_count += self.clear_expired_flood_wait()
+        
+        if recovered_count > 0 or expired_count > 0:
+            logging.info(f"🧹 API调用FloodWait自动恢复: 修复 {recovered_count} 个异常限制，清理 {expired_count} 个过期记录")
+        
         return recovered_count, expired_count
     
     def get_health_status(self):
@@ -391,14 +525,57 @@ class FloodWaitManager:
     def get_optimal_batch_size(self, operation_type):
         """获取最优批量操作大小"""
         # 根据操作类型返回安全的批量大小
-        if operation_type in ['send_message', 'edit_message']:
-            return 5  # 消息操作，批量5个
-        elif operation_type in ['forward_message', 'copy_message']:
-            return 3  # 转发/复制操作，批量3个
-        elif operation_type in ['delete_message']:
-            return 10  # 删除操作，批量10个
-        else:
-            return 1  # 其他操作，单个执行
+        batch_sizes = {
+            'send_message': 5,        # 发送消息：每次最多5条
+            'edit_message': 3,        # 编辑消息：每次最多3条
+            'forward_message': 3,     # 转发消息：每次最多3条
+            'copy_message': 4,        # 复制消息：每次最多4条
+            'send_media_group': 2,    # 发送媒体组：每次最多2组
+        }
+        return batch_sizes.get(operation_type, 3)
+    
+    def get_safe_delay(self, operation_type, batch_size=1):
+        """获取安全的操作延迟"""
+        base_delay = self.operation_delays.get(operation_type, 2)
+        # 批量操作时增加延迟
+        if batch_size > 1:
+            base_delay += (batch_size - 1) * 0.5
+        return base_delay
+    
+    def should_skip_operation(self, operation_type, user_id=None):
+        """检查是否应该跳过操作（已移除用户限制检查）"""
+        # 不再阻止任何用户操作，只保留最基本的频率控制
+        key = f"{operation_type}_{user_id}" if user_id else operation_type
+        
+        # 只检查操作频率，不阻止操作
+        if key in self.last_operation_time:
+            last_time = self.last_operation_time[key]
+            delay_needed = self.operation_delays.get(operation_type, 2)
+            time_since_last = time.time() - last_time
+            
+            # 如果间隔太短，只记录日志，不阻止
+            if time_since_last < delay_needed:
+                logging.debug(f"操作 {operation_type} 频率较高，但已移除阻止机制")
+                return False  # 不再阻止操作
+        
+        return False  # 默认允许所有操作
+
+# 创建全局FloodWait管理器实例
+flood_wait_manager = FloodWaitManager()
+# 创建内存存储管理器实例
+memory_storage = None
+if MEMORY_STORAGE_AVAILABLE:
+    try:
+        memory_storage = MemoryStorageManager(bot_config['bot_id'], backup_interval=300)
+        logging.info(f"[{bot_config['bot_id']}] 内存存储管理器已初始化")
+    except Exception as e:
+        logging.error(f"[{bot_config['bot_id']}] 内存存储管理器初始化失败: {e}")
+        memory_storage = None
+
+
+# 全局消息处理记录，防止重复处理
+processed_messages = {}
+
 # ==================== 性能监控系统 ====================
 performance_stats = defaultdict(list)
 

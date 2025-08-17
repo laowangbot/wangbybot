@@ -203,8 +203,8 @@ class FloodWaitManager:
         # 智能检测异常时间
         if wait_time > 300:  # 超过5分钟，可能是异常
             logging.warning(f"🚨 检测到极异常的FloodWait时间: {wait_time}秒，可能是Telegram API错误")
-            # 对于极异常时间，直接限制为30秒
-            safe_wait_time = 30
+            # 对于极异常时间，使用更保守的限制
+            safe_wait_time = min(30, wait_time // 10)  # 最多30秒
         elif wait_time > 120:  # 超过2分钟，可能是异常
             logging.warning(f"⚠️ 检测到异常的FloodWait时间: {wait_time}秒，已自动限制为60秒")
             safe_wait_time = 60
@@ -323,15 +323,42 @@ class FloodWaitManager:
         
         return len(expired_keys)
     
-    def auto_recovery_check(self):
-        """自动恢复检查 - 智能检测并修复异常的FloodWait限制"""
+        def auto_recovery_check(self):
+        """自动恢复检查 - 更激进的异常处理"""
         current_time = time.time()
-        recovered_count = 0
-        expired_count = 0
+        operations_to_remove = []
         
-        # 检查所有FloodWait限制
-        for key, wait_until in list(self.flood_wait_times.items()):
-            remaining = wait_until - current_time
+        for operation_type, status in self.flood_wait_status.items():
+            wait_until = status["wait_until"]
+            original_time = status.get("original_time", 0)
+            
+            # 如果等待时间超过5分钟，直接清除
+            if current_time < wait_until and (wait_until - current_time) > 300:
+                logging.warning(f"🚨 自动清除异常FloodWait: {operation_type} 剩余 {wait_until - current_time:.1f}秒")
+                operations_to_remove.append(operation_type)
+                continue
+            
+            # 如果等待时间超过2分钟，限制为60秒
+            if current_time < wait_until and (wait_until - current_time) > 120:
+                logging.warning(f"🔄 自动限制异常FloodWait: {operation_type} 从 {original_time}秒 限制为 60秒")
+                status["wait_until"] = current_time + 60
+                status["wait_time"] = 60
+                continue
+            
+            # 如果等待时间超过1分钟，限制为60秒
+            if current_time < wait_until and (wait_until - current_time) > 60:
+                logging.info(f"🔄 自动调整FloodWait: {operation_type} 从 {original_time}秒 限制为 60秒")
+                status["wait_until"] = current_time + 60
+                status["wait_time"] = 60
+                continue
+        
+        # 移除需要清除的操作
+        for operation_type in operations_to_remove:
+            del self.flood_wait_status[operation_type]
+        
+        # 清理过期的限制
+        self.clear_expired_flood_wait()")
+                continue
             
             if remaining <= 0:
                 # 已过期的限制
@@ -391,14 +418,57 @@ class FloodWaitManager:
     def get_optimal_batch_size(self, operation_type):
         """获取最优批量操作大小"""
         # 根据操作类型返回安全的批量大小
-        if operation_type in ['send_message', 'edit_message']:
-            return 5  # 消息操作，批量5个
-        elif operation_type in ['forward_message', 'copy_message']:
-            return 3  # 转发/复制操作，批量3个
-        elif operation_type in ['delete_message']:
-            return 10  # 删除操作，批量10个
-        else:
-            return 1  # 其他操作，单个执行
+        batch_sizes = {
+            'send_message': 5,        # 发送消息：每次最多5条
+            'edit_message': 3,        # 编辑消息：每次最多3条
+            'forward_message': 3,     # 转发消息：每次最多3条
+            'copy_message': 4,        # 复制消息：每次最多4条
+            'send_media_group': 2,    # 发送媒体组：每次最多2组
+        }
+        return batch_sizes.get(operation_type, 3)
+    
+    def get_safe_delay(self, operation_type, batch_size=1):
+        """获取安全的操作延迟"""
+        base_delay = self.operation_delays.get(operation_type, 2)
+        # 批量操作时增加延迟
+        if batch_size > 1:
+            base_delay += (batch_size - 1) * 0.5
+        return base_delay
+    
+    def should_skip_operation(self, operation_type, user_id=None):
+        """检查是否应该跳过操作（已移除用户限制检查）"""
+        # 不再阻止任何用户操作，只保留最基本的频率控制
+        key = f"{operation_type}_{user_id}" if user_id else operation_type
+        
+        # 只检查操作频率，不阻止操作
+        if key in self.last_operation_time:
+            last_time = self.last_operation_time[key]
+            delay_needed = self.operation_delays.get(operation_type, 2)
+            time_since_last = time.time() - last_time
+            
+            # 如果间隔太短，只记录日志，不阻止
+            if time_since_last < delay_needed:
+                logging.debug(f"操作 {operation_type} 频率较高，但已移除阻止机制")
+                return False  # 不再阻止操作
+        
+        return False  # 默认允许所有操作
+
+# 创建全局FloodWait管理器实例
+flood_wait_manager = FloodWaitManager()
+# 创建内存存储管理器实例
+memory_storage = None
+if MEMORY_STORAGE_AVAILABLE:
+    try:
+        memory_storage = MemoryStorageManager(bot_config['bot_id'], backup_interval=300)
+        logging.info(f"[{bot_config['bot_id']}] 内存存储管理器已初始化")
+    except Exception as e:
+        logging.error(f"[{bot_config['bot_id']}] 内存存储管理器初始化失败: {e}")
+        memory_storage = None
+
+
+# 全局消息处理记录，防止重复处理
+processed_messages = {}
+
 # ==================== 性能监控系统 ====================
 performance_stats = defaultdict(list)
 
