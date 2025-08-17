@@ -323,41 +323,21 @@ class FloodWaitManager:
         
         return len(expired_keys)
     
-        def auto_recovery_check(self):
-        """自动恢复检查 - 更激进的异常处理"""
+    def auto_recovery_check(self):
+        """自动恢复检查 - 智能检测并修复异常的FloodWait限制"""
         current_time = time.time()
-        operations_to_remove = []
+        recovered_count = 0
+        expired_count = 0
         
-        for operation_type, status in self.flood_wait_status.items():
-            wait_until = status["wait_until"]
-            original_time = status.get("original_time", 0)
+        for key, wait_until in list(self.flood_wait_times.items()):
+            remaining = wait_until - current_time
             
-            # 如果等待时间超过5分钟，直接清除
-            if current_time < wait_until and (wait_until - current_time) > 300:
-                logging.warning(f"🚨 自动清除异常FloodWait: {operation_type} 剩余 {wait_until - current_time:.1f}秒")
-                operations_to_remove.append(operation_type)
-                continue
-            
-            # 如果等待时间超过2分钟，限制为60秒
-            if current_time < wait_until and (wait_until - current_time) > 120:
-                logging.warning(f"🔄 自动限制异常FloodWait: {operation_type} 从 {original_time}秒 限制为 60秒")
-                status["wait_until"] = current_time + 60
-                status["wait_time"] = 60
-                continue
-            
-            # 如果等待时间超过1分钟，限制为60秒
-            if current_time < wait_until and (wait_until - current_time) > 60:
-                logging.info(f"🔄 自动调整FloodWait: {operation_type} 从 {original_time}秒 限制为 60秒")
-                status["wait_until"] = current_time + 60
-                status["wait_time"] = 60
-                continue
-        
-        # 移除需要清除的操作
-        for operation_type in operations_to_remove:
-            del self.flood_wait_status[operation_type]
-        
-        # 清理过期的限制
-        self.clear_expired_flood_wait()")
+            # 只处理API调用相关的限制
+            if not self.is_api_operation(key):
+                # 非API操作，直接清除
+                del self.flood_wait_times[key]
+                expired_count += 1
+                logging.debug(f"清理非API操作的FloodWait限制: {key}")
                 continue
             
             if remaining <= 0:
@@ -2745,54 +2725,6 @@ async def restore_command(client, message):
     else:
         await message.reply("❌ 内存存储管理器未启用")
 
-
-@app.on_message(filters.command("emergency") & filters.private)
-async def emergency_reset_command(client, message):
-    """紧急重置所有状态，解决FloodWait和按钮失效问题"""
-    user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
-    
-    if not is_admin_user(user_id):
-        await message.reply("❌ 您没有管理员权限")
-        return
-    
-    try:
-        # 重置FloodWait状态
-        if hasattr(flood_wait_manager, 'flood_wait_status'):
-            flood_wait_manager.flood_wait_status.clear()
-            logging.info(f"[{bot_config['bot_id']}] 已清除所有FloodWait状态")
-        
-        # 重置用户状态
-        if user_id in user_states:
-            del user_states[user_id]
-            logging.info(f"[{bot_id}] 已清除用户状态")
-        
-        # 重置pending_logins
-        if user_id in pending_logins:
-            del pending_logins[user_id]
-            logging.info(f"[{bot_id}] 已清除登录等待状态")
-        
-        # 重置processed_messages
-        global processed_messages
-        keys_to_remove = [k for k in processed_messages.keys() if k.startswith(f"{user_id}_")]
-        for k in keys_to_remove:
-            del processed_messages[k]
-        
-        await message.reply(
-            "🚨 **紧急重置完成**\n\n"
-            "已清除以下状态：\n"
-            "✅ FloodWait限制\n"
-            "✅ 用户状态\n"
-            "✅ 登录等待\n"
-            "✅ 消息处理记录\n\n"
-            "现在所有功能应该恢复正常！"
-        )
-        
-    except Exception as e:
-        logging.error(f"紧急重置失败: {e}")
-        await message.reply(f"❌ 紧急重置失败: {str(e)}")
 @app.on_message(filters.command("storage") & filters.private)
 async def storage_status_command(client, message):
     """查看存储状态"""
