@@ -613,7 +613,7 @@ pending_logins = {}   # {user_id: {"waiting_for_username": True}}
 def save_login_data():
     """保存登录数据到文件"""
     try:
-        login_file = f"user_login_{bot_config['bot_id']}.json"
+        login_file = get_config_path(f"user_login_{bot_config['bot_id']}.json")
         login_data = {
             "logged_in_users": logged_in_users,
             "login_attempts": login_attempts
@@ -628,7 +628,7 @@ def load_login_data():
     """从文件加载登录数据"""
     global logged_in_users, login_attempts
     try:
-        login_file = f"user_login_{bot_config['bot_id']}.json"
+        login_file = get_config_path(f"user_login_{bot_config['bot_id']}.json")
         if os.path.exists(login_file):
             with open(login_file, "r", encoding="utf-8") as f:
                 login_data = json.load(f)
@@ -2395,6 +2395,54 @@ async def debug_command(client, message):
             debug_text += "• 没有启用监听的频道组\n"
     
     await message.reply(debug_text)
+
+# 登录测试命令
+@app.on_message(filters.command("testlogin") & filters.private)
+async def test_login_status(message):
+    """测试登录状态"""
+    user_id = message.from_user.id
+    
+    # 检查登录状态
+    if is_user_logged_in(user_id):
+        username = get_logged_in_username(user_id)
+        is_admin = is_admin_user(user_id)
+        admin_text = " (管理员)" if is_admin else ""
+        
+        await message.reply_text(
+            f"✅ **登录状态检查**\n\n"
+            f"用户ID: {user_id}\n"
+            f"用户名: {username}{admin_text}\n"
+            f"状态: 已登录\n\n"
+            f"所有功能可用！"
+        )
+    else:
+        await message.reply_text(
+            f"❌ **登录状态检查**\n\n"
+            f"用户ID: {user_id}\n"
+            f"状态: 未登录\n\n"
+            f"请使用 /start 命令登录"
+        )
+
+# 登录数据检查命令
+@app.on_message(filters.command("checklogin") & filters.private)
+async def check_login_data(message):
+    """检查登录数据"""
+    user_id = message.from_user.id
+    
+    if not is_admin_user(user_id):
+        await message.reply_text("❌ 只有管理员可以使用此命令")
+        return
+    
+    # 显示登录数据统计
+    total_users = len(logged_in_users)
+    total_attempts = len(login_attempts)
+    
+    await message.reply_text(
+        f"📊 **登录数据统计**\n\n"
+        f"已登录用户: {total_users}\n"
+        f"登录尝试记录: {total_attempts}\n\n"
+        f"数据文件: {get_config_path(f'user_login_{bot_config['bot_id']}.json')}"
+    )
 
 # ==================== 回调处理 ====================
 @app.on_callback_query()
