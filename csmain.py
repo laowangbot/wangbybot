@@ -871,6 +871,7 @@ async def handle_username_input(message):
     # 验证用户名和密码
     if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
         # 登录成功，清理所有失败记录
+        user_id_str = str(user_id)
         if user_id_str in login_attempts:
             del login_attempts[user_id_str]
         
@@ -2737,7 +2738,7 @@ async def check_login_data(message):
         f"📊 **登录数据统计**\n\n"
         f"已登录用户: {total_users}\n"
         f"登录尝试记录: {total_attempts}\n\n"
-        f"数据文件: {get_config_path(f'user_login_{bot_config['bot_id']}.json')}"
+        f"数据文件: {get_config_path('user_login_' + bot_config['bot_id'] + '.json')}"
     )
 
 # ==================== 回调处理 ====================
