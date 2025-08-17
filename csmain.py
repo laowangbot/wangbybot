@@ -399,6 +399,10 @@ class FloodWaitManager:
             return 10  # 删除操作，批量10个
         else:
             return 1  # 其他操作，单个执行
+
+# 创建全局FloodWait管理器实例
+flood_wait_manager = FloodWaitManager()
+
 # ==================== 性能监控系统 ====================
 performance_stats = defaultdict(list)
 
@@ -441,6 +445,12 @@ def get_performance_stats():
 # 导入新的搬运引擎
 try:
     from new_cloning_engine import RobustCloningEngine, MessageDeduplicator
+    NEW_ENGINE_AVAILABLE = True
+    logging.info("新搬运引擎已加载")
+except ImportError as e:
+    NEW_ENGINE_AVAILABLE = False
+    logging.warning(f"新搬运引擎加载失败: {e}")
+
 # 导入内存存储管理器
 try:
     from memory_storage_manager import MemoryStorageManager
@@ -450,12 +460,6 @@ except ImportError as e:
     MEMORY_STORAGE_AVAILABLE = False
     logging.warning(f"内存存储管理器加载失败: {e}")
 
-    NEW_ENGINE_AVAILABLE = True
-    logging.info("新搬运引擎已加载")
-except ImportError as e:
-    NEW_ENGINE_AVAILABLE = False
-    logging.warning(f"新搬运引擎加载失败: {e}")
-
 # Render 部署支持
 try:
     from keep_alive import run_keep_alive
@@ -464,6 +468,10 @@ try:
 except ImportError:
     RENDER_DEPLOYMENT = False
     logging.info("Render keep_alive 模块未找到，跳过部署支持")
+
+# ==================== 内存存储管理器初始化 ====================
+# 创建内存存储管理器实例
+memory_storage = None
 
 # ==================== 运行中任务持久化 ====================
 running_tasks = {}
@@ -624,6 +632,15 @@ def get_bot_config():
 bot_config = get_bot_config()
 print(f"🤖 启动机器人: {bot_config['bot_name']} - {bot_config['bot_version']}")
 print(f"🔑 机器人ID: {bot_config['bot_id']}")
+
+# 初始化内存存储管理器
+if MEMORY_STORAGE_AVAILABLE:
+    try:
+        memory_storage = MemoryStorageManager(bot_config['bot_id'], backup_interval=300)
+        logging.info(f"[{bot_config['bot_id']}] 内存存储管理器已初始化")
+    except Exception as e:
+        logging.error(f"[{bot_config['bot_id']}] 内存存储管理器初始化失败: {e}")
+        memory_storage = None
 
 app = Client(f"{bot_config['bot_id']}_session", api_id=bot_config['api_id'], api_hash=bot_config['api_hash'], bot_token=bot_config['bot_token'])
 
@@ -1402,16 +1419,6 @@ def save_configs():
                 json.dump(user_configs, f, ensure_ascii=False, indent=4)
             logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到备份文件 {backup_file}")
         except Exception as backup_e:
-            logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")] 用户配置已保存到 {config_file}。")
-    except Exception as e:
-        logging.error(f"[{bot_config['bot_id']}] 保存用户配置失败: {e}")
-        # 尝试保存到当前目录作为备份
-        backup_file = f"user_configs_{bot_config['bot_id']}.json"
-        try:
-            with open(backup_file, "w", encoding='utf-8') as f:
-                json.dump(user_configs, f, ensure_ascii=False, indent=4)
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到备份文件 {backup_file}。")
-        except Exception as backup_e:
             logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")
 
 def load_configs():
@@ -1461,37 +1468,6 @@ def load_configs():
     
     # 如果都失败，创建新配置
     logging.info(f"[{bot_config['bot_id']}] 配置文件不存在，将创建新配置")
-    user_configs = {}.json")
-    backup_file = f"user_configs_{bot_config['bot_id']}.json"
-    
-    # 首先尝试从持久化存储加载
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, "r", encoding='utf-8') as f:
-                user_configs = json.load(f)
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已从持久化存储 {config_file} 载入。")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 从持久化存储加载配置失败: {e}")
-    
-    # 如果持久化存储失败，尝试从备份文件加载
-    if os.path.exists(backup_file):
-        try:
-            with open(backup_file, "r", encoding='utf-8') as f:
-                user_configs = json.load(f)
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已从备份文件 {backup_file} 载入。")
-            # 尝试保存到持久化存储
-            try:
-                save_configs()
-                logging.info(f"[{bot_config['bot_id']}] 配置已迁移到持久化存储。")
-            except Exception as migrate_e:
-                logging.error(f"[{bot_config['bot_id']}] 迁移到持久化存储失败: {migrate_e}")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 从备份文件加载配置失败: {e}")
-    
-    # 如果都失败，创建新配置
-    logging.info(f"[{bot_config['bot_id']}] 配置文件不存在，将创建新配置。")
     user_configs = {}
 
 def save_user_states():
@@ -1536,10 +1512,8 @@ def load_user_states():
             logging.error(f"[{bot_config['bot_id']}] 内存存储恢复失败: {e}")
     
     # 回退到文件加载
-    """从文件载入用户状态"""
-    global user_states
+    config_file = get_config_path(f"user_states_{bot_config['bot_id']}.json")
     try:
-        config_file = get_config_path(f"user_states_{bot_config['bot_id']}.json")
         if os.path.exists(config_file):
             with open(config_file, "r", encoding="utf-8") as f:
                 user_states = json.load(f)
@@ -1562,7 +1536,6 @@ def save_history():
             logging.error(f"[{bot_config['bot_id']}] 内存存储保存失败: {e}")
     
     # 回退到文件存储
-    """将历史记录保存到文件"""
     config_file = get_config_path(f"user_history_{bot_config['bot_id']}.json")
     try:
         with open(config_file, "w", encoding="utf-8") as f:
@@ -1593,7 +1566,6 @@ def load_history():
             logging.error(f"[{bot_config['bot_id']}] 内存存储恢复失败: {e}")
     
     # 回退到文件加载
-    """从文件载入历史记录"""
     global user_history
     config_file = get_config_path(f"user_history_{bot_config['bot_id']}.json")
     backup_file = f"user_history_{bot_config['bot_id']}.json"
@@ -2697,12 +2669,12 @@ async def emergency_reset_command(client, message):
         # 重置用户状态
         if user_id in user_states:
             del user_states[user_id]
-            logging.info(f"[{bot_id}] 已清除用户状态")
+            logging.info(f"[{bot_config['bot_id']}] 已清除用户状态")
         
         # 重置pending_logins
         if user_id in pending_logins:
             del pending_logins[user_id]
-            logging.info(f"[{bot_id}] 已清除登录等待状态")
+            logging.info(f"[{bot_config['bot_id']}] 已清除登录等待状态")
         
         # 重置processed_messages
         global processed_messages
@@ -7262,7 +7234,7 @@ def start_port_server():
                 <head><title>搬运机器人服务</title></head>
                 <body>
                 <h1>🤖 {bot_name} - {bot_version}</h1>
-                <p>机器人ID: {bot_id}</p>
+                <p>机器人ID: {bot_config['bot_id']}</p>
                 <p>状态：正常运行中</p>
                 <p>时间：{current_time}</p>
                 </body>
@@ -7270,7 +7242,6 @@ def start_port_server():
                 """.format(
                     bot_name=bot_config['bot_name'],
                     bot_version=bot_config['bot_version'],
-                    bot_id=bot_config['bot_id'],
                     current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 )
                 self.wfile.write(response.encode())
