@@ -1496,7 +1496,7 @@ def get_feature_config_menu(user_id):
     
     buttons = [
         # 🔍 内容过滤区域
-        [InlineKeyboardButton("🔍 **内容过滤设置**", callback_data="none")],
+        [InlineKeyboardButton("🔍 **内容过滤设置**", callback_data="filter_settings_header")],
         [
             InlineKeyboardButton(f"📝 关键字过滤 ({keywords_count})", callback_data="manage_filter_keywords"),
             InlineKeyboardButton(f"🔀 敏感词替换 ({replacements_count})", callback_data="manage_replacement_words")
@@ -1507,11 +1507,11 @@ def get_feature_config_menu(user_id):
         ],
         
         # 🎛️ 按钮和界面控制
-        [InlineKeyboardButton("🎛️ **按钮和界面控制**", callback_data="none")],
+        [InlineKeyboardButton("🎛️ **按钮和界面控制**", callback_data="button_control_header")],
         [InlineKeyboardButton(f"{button_filter_status} 按钮策略设定", callback_data="manage_filter_buttons")],
         
         # ✨ 内容增强功能
-        [InlineKeyboardButton("✨ **内容增强功能**", callback_data="none")],
+        [InlineKeyboardButton("✨ **内容增强功能**", callback_data="content_enhancement_header")],
         [
             InlineKeyboardButton(f"{tail_text_status} 附加文字设定", callback_data="request_tail_text"),
             InlineKeyboardButton(f"📋 附加按钮设定 ({buttons_count})", callback_data="request_buttons")
@@ -1799,7 +1799,7 @@ async def show_monitor_channels_menu(message, user_id):
         else:
             # 暂停的频道组显示为灰色，不可点击
             button_text = f"⏸ {pair['source']} -> {pair['target']} (已暂停)"
-            buttons.append([InlineKeyboardButton(button_text, callback_data="noop")])
+            buttons.append([InlineKeyboardButton(button_text, callback_data="monitor_pair_disabled")])
     
     buttons.append([InlineKeyboardButton("✅ 全选", callback_data="monitor_select_all")])
     buttons.append([InlineKeyboardButton("❌ 全不选", callback_data="monitor_select_none")])
@@ -2758,9 +2758,18 @@ async def callback_handler(client, callback_query):
         await request_button_interval(callback_query.message, user_id)
     elif data.startswith("set_button_probability"):
         await request_button_probability(callback_query.message, user_id)
-    elif data == "noop":
-        # 无操作，用于已暂停的频道组按钮
-        pass
+    elif data == "monitor_pair_disabled":
+        # 已暂停的频道组按钮，显示提示
+        try:
+            await callback_query.answer("⏸ 该频道组已暂停，无法操作", show_alert=True)
+        except Exception as e:
+            logging.warning(f"回调查询应答失败: {e}")
+    elif data in ["filter_settings_header", "button_control_header", "content_enhancement_header"]:
+        # 标题按钮，无需操作
+        try:
+            await callback_query.answer("ℹ️ 这是功能分类标题", show_alert=False)
+        except Exception as e:
+            logging.warning(f"回调查询应答失败: {e}")
 
 # ==================== 智能搬运优化命令 ====================
 @app.on_message(filters.command("optimize") & filters.private)
