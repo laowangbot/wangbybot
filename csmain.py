@@ -4573,6 +4573,9 @@ async def request_channel_pair_input(message, user_id):
     if user_id not in user_states: user_states[user_id] = []
     user_states[user_id].append(new_task)
     
+    # 自动保存用户状态
+    save_user_states()
+    
     await safe_edit_or_reply(message, f"请回复**采集频道**的用户名或ID。\n例如：`@mychannel` 或 `-1001234567890`\n(任务ID: `{task_id[:8]}`)")
 
 # 新增功能：编辑频道组时的输入请求
@@ -4633,6 +4636,7 @@ async def set_channel_pair(client, message, user_id, channel_type, channel_id, t
             task["pair_data"]["enabled"] = True
             user_configs[str(user_id)]["channel_pairs"].append(task["pair_data"])
             save_configs() # 新增: 保存配置
+            save_user_states() # 新增: 保存用户状态
             logging.info(f"用户 {user_id} 成功新增频道组: {task['pair_data']}")
             await message.reply_text(f"✅ **频道组** `{task['pair_data']['source']}` -> `{task['pair_data']['target']}` 已新增。")
             remove_task(user_id, task["task_id"])
@@ -4762,6 +4766,7 @@ async def add_replacement(message, user_id, task):
         current_replacements.update(replacement_dict)
         
         save_configs()
+        save_user_states()  # 新增: 保存用户状态
         remove_task(user_id, task["task_id"])
         
         # 显示成功消息并返回管理菜单
