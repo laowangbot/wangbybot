@@ -151,41 +151,52 @@ class FloodWaitManager:
         current_time = time.time()
         key = f"{operation_type}_{user_id}" if user_id else operation_type
         
-        # 检查FloodWait限制
+        # 检查FloodWait限制 - 只影响机器人API调用，不影响用户操作
         if operation_type in self.flood_wait_times:
             wait_until = self.flood_wait_times[operation_type]
             remaining = wait_until - current_time
             
             if remaining > 0:
-                # 智能等待策略
-                if remaining > 60:  # 超过1分钟，使用更激进的策略
-                    safe_wait = min(30, remaining // 2)  # 最多等待30秒
-                    logging.info(f"🔄 智能等待策略: {operation_type} 原始等待 {remaining:.1f}秒，实际等待 {safe_wait}秒")
-                    await asyncio.sleep(safe_wait)
-                    # 清除过长的限制
-                    if remaining > 120:
+                # 智能等待策略 - 只等待必要的API操作
+                if operation_type in ['send_message', 'edit_message', 'delete_message']:
+                    # 这些是机器人API调用，需要等待
+                    if remaining > 60:  # 超过1分钟，使用更激进的策略
+                        safe_wait = min(30, remaining // 2)  # 最多等待30秒
+                        logging.info(f"🔄 API调用等待: {operation_type} 原始等待 {remaining:.1f}秒，实际等待 {safe_wait}秒")
+                        await asyncio.sleep(safe_wait)
+                        # 清除过长的限制
+                        if remaining > 120:
+                            del self.flood_wait_times[operation_type]
+                            logging.info(f"🧹 清除过长的FloodWait限制: {operation_type}")
+                    else:
+                        # 正常等待
+                        logging.info(f"⏳ API调用等待: {operation_type} 剩余 {remaining:.1f}秒")
+                        await asyncio.sleep(remaining)
+                        # 清除已完成的限制
                         del self.flood_wait_times[operation_type]
-                        logging.info(f"🧹 清除过长的FloodWait限制: {operation_type}")
                 else:
-                    # 正常等待
-                    logging.info(f"⏳ 等待FloodWait限制: {operation_type} 剩余 {remaining:.1f}秒")
-                    await asyncio.sleep(remaining)
-                    # 清除已完成的限制
+                    # 非API调用操作，不等待，直接清除限制
+                    logging.info(f"🧹 非API操作，清除FloodWait限制: {operation_type}")
                     del self.flood_wait_times[operation_type]
         
-        # 基本的操作间隔控制（最小化）
-        if key in self.last_operation_time:
+        # 基本的操作间隔控制（最小化）- 只针对API调用
+        if key in self.last_operation_time and operation_type in ['send_message', 'edit_message', 'delete_message']:
             last_time = self.last_operation_time[key]
             delay_needed = self.operation_delays.get(operation_type, 0.1)  # 减少到0.1秒
             time_since_last = current_time - last_time
             
             if time_since_last < delay_needed:
                 sleep_time = max(0.01, delay_needed - time_since_last)
-                logging.debug(f"操作 {operation_type} 间隔控制，等待 {sleep_time:.3f} 秒")
+                logging.debug(f"API操作间隔控制: {operation_type} 等待 {sleep_time:.3f} 秒")
                 await asyncio.sleep(sleep_time)
         
         # 更新最后操作时间
         self.last_operation_time[key] = time.time()
+    
+    def is_api_operation(self, operation_type):
+        """判断是否为API调用操作"""
+        api_operations = ['send_message', 'edit_message', 'delete_message', 'forward_message', 'copy_message']
+        return operation_type in api_operations
     
     def set_flood_wait(self, operation_type, wait_time, user_id=None):
         """设置FloodWait等待时间，智能处理异常时间"""
@@ -204,26 +215,30 @@ class FloodWaitManager:
             # 正常时间范围，直接使用
             safe_wait_time = wait_time
         
-        # 不再记录用户级限制，只记录全局限制
-        if not user_id or user_id == 'unknown':
-            key = operation_type
-            wait_until = time.time() + safe_wait_time
-            self.flood_wait_times[key] = wait_until
-            
-            # 记录调整信息
-            if safe_wait_time != wait_time:
-                logging.warning(f"🔄 FloodWait时间调整: {operation_type} 从 {wait_time}秒 调整为 {safe_wait_time}秒")
-            
-            # 格式化等待时间
-            if safe_wait_time >= 60:
-                time_str = f"{safe_wait_time // 60}分钟{safe_wait_time % 60}秒"
+        # 只记录API调用的FloodWait限制，不影响用户操作
+        if self.is_api_operation(operation_type):
+            if not user_id or user_id == 'unknown':
+                key = operation_type
+                wait_until = time.time() + safe_wait_time
+                self.flood_wait_times[key] = wait_until
+                
+                # 记录调整信息
+                if safe_wait_time != wait_time:
+                    logging.warning(f"🔄 API调用FloodWait调整: {operation_type} 从 {wait_time}秒 调整为 {safe_wait_time}秒")
+                
+                # 格式化等待时间
+                if safe_wait_time >= 60:
+                    time_str = f"{safe_wait_time // 60}分钟{safe_wait_time % 60}秒"
+                else:
+                    time_str = f"{safe_wait_time}秒"
+                
+                logging.info(f"📝 API调用 {operation_type} 设置等待时间: {time_str}")
             else:
-                time_str = f"{safe_wait_time}秒"
-            
-            logging.info(f"📝 全局操作 {operation_type} 设置等待时间: {time_str}")
+                # 用户级API限制只记录日志，不阻止操作
+                logging.info(f"用户 {user_id} 的API调用 {operation_type} 遇到限制，但已移除阻止机制")
         else:
-            # 用户级限制只记录日志，不阻止操作
-            logging.info(f"用户 {user_id} 的操作 {operation_type} 遇到限制，但已移除阻止机制")
+            # 非API操作，不记录FloodWait限制
+            logging.info(f"非API操作 {operation_type}，不记录FloodWait限制")
     
     def get_wait_time(self, operation_type, user_id=None):
         """获取剩余等待时间（已移除用户级限制）"""
@@ -309,36 +324,51 @@ class FloodWaitManager:
         return len(expired_keys)
     
     def auto_recovery_check(self):
-        """自动恢复检查 - 检测并修复异常的FloodWait限制"""
+        """自动恢复检查 - 智能检测并修复异常的FloodWait限制"""
         current_time = time.time()
         recovered_count = 0
+        expired_count = 0
         
         for key, wait_until in list(self.flood_wait_times.items()):
             remaining = wait_until - current_time
             
-            # 检查是否有异常的长等待时间（超过5分钟）
-            if remaining > 300:  # 5分钟 = 300秒
-                logging.warning(f"🚨 检测到异常的FloodWait限制: {key}，剩余时间: {remaining}秒")
-                
-                # 自动修复为合理的等待时间
-                safe_wait_time = min(remaining, 60)  # 最多60秒
-                new_wait_until = current_time + safe_wait_time
-                
-                # 更新等待时间
+            # 只处理API调用相关的限制
+            if not self.is_api_operation(key):
+                # 非API操作，直接清除
+                del self.flood_wait_times[key]
+                expired_count += 1
+                logging.debug(f"清理非API操作的FloodWait限制: {key}")
+                continue
+            
+            if remaining <= 0:
+                # 已过期的限制
+                del self.flood_wait_times[key]
+                expired_count += 1
+                logging.debug(f"清理过期的API调用FloodWait限制: {key}")
+            elif remaining > 300:  # 超过5分钟，极异常
+                # 极异常限制，直接清除
+                del self.flood_wait_times[key]
+                recovered_count += 1
+                logging.warning(f"🚨 清除极异常的API调用FloodWait限制: {key}，剩余时间: {remaining}秒")
+            elif remaining > 120:  # 超过2分钟，异常
+                # 异常限制，限制为60秒
+                new_wait_until = current_time + 60
                 self.flood_wait_times[key] = new_wait_until
                 recovered_count += 1
-                
-                logging.info(f"✅ 已自动修复异常限制: {key}，新等待时间: {safe_wait_time}秒")
-                
-                # 如果剩余时间超过10分钟，记录严重警告
-                if remaining > 600:  # 10分钟
-                    logging.critical(f"🚨🚨 严重异常: {key} 的等待时间超过10分钟({remaining}秒)，已强制修复")
+                logging.warning(f"⚠️ 修复异常的API调用FloodWait限制: {key}，从 {remaining}秒 调整为 60秒")
+            elif remaining > 60:  # 超过1分钟，可能异常
+                # 可能异常，限制为原时间的一半
+                new_wait_time = min(60, remaining // 2)
+                new_wait_until = current_time + new_wait_time
+                self.flood_wait_times[key] = new_wait_until
+                recovered_count += 1
+                logging.info(f"🔄 调整较长的API调用FloodWait限制: {key}，从 {remaining}秒 调整为 {new_wait_time}秒")
         
         # 清理过期的记录
-        expired_count = self.clear_expired_flood_wait()
+        expired_count += self.clear_expired_flood_wait()
         
         if recovered_count > 0 or expired_count > 0:
-            logging.info(f"🔄 自动恢复完成: 修复了 {recovered_count} 个异常限制，清理了 {expired_count} 个过期记录")
+            logging.info(f"🧹 API调用FloodWait自动恢复: 修复 {recovered_count} 个异常限制，清理 {expired_count} 个过期记录")
         
         return recovered_count, expired_count
     
