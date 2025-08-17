@@ -425,7 +425,7 @@ except ImportError as e:
 
 # Render 部署支持
 try:
-    from keep_alive import run_keep_alive
+    # keep_alive模块已移除
     RENDER_DEPLOYMENT = True
     logging.info("Render keep_alive 模块已加载")
 except ImportError:
@@ -851,14 +851,7 @@ def get_main_menu_buttons(user_id):
         ]
     ]
     
-    # 添加管理员专用按钮和登出按钮
-    admin_logout_row = []
-    if is_admin_user(user_id):
-        admin_logout_row.append(InlineKeyboardButton("👑 管理面板", callback_data="show_admin_panel"))
-    admin_logout_row.append(InlineKeyboardButton("🚪 退出登录", callback_data="logout"))
-    
-    if admin_logout_row:
-        buttons.append(admin_logout_row)
+    # 登出按钮已移除（登录系统已删除）
     
     return InlineKeyboardMarkup(buttons)
 
@@ -2116,55 +2109,12 @@ async def callback_handler(client, callback_query):
     elif data == "monitor_select_none":
         await monitor_select_none(callback_query.message, user_id)
     elif data == "logout":
-        await handle_logout(callback_query.message, user_id)
-    elif data == "show_admin_panel":
-        await show_admin_panel(callback_query.message, user_id)
-    elif data.startswith("admin_"):
-        if data == "admin_clear_performance":
-            if is_admin_user(user_id):
-                performance_stats.clear()
-                try:
-                    await callback_query.answer("✅ 性能统计已清空")
-                except Exception as e:
-                    logging.warning(f"回调查询应答失败: {e}")
-                await show_performance_monitor(callback_query.message, user_id)
-        elif data == "admin_gc_collect":
-            if is_admin_user(user_id):
-                import gc
-                collected = gc.collect()
-                try:
-                    await callback_query.answer(f"✅ 垃圾回收完成，清理了 {collected} 个对象")
-                except Exception as e:
-                    logging.warning(f"回调查询应答失败: {e}")
-                await show_system_maintenance(callback_query.message, user_id)
-        elif data == "admin_clear_cache":
-            if is_admin_user(user_id):
-                realtime_dedupe_cache.clear()
-                try:
-                    await callback_query.answer("✅ 缓存已清理")
-                except Exception as e:
-                    logging.warning(f"回调查询应答失败: {e}")
-                await show_system_maintenance(callback_query.message, user_id)
-        elif data == "admin_save_all":
-            if is_admin_user(user_id):
-                try:
-                    save_configs()
-                    save_history()
-                    save_running_tasks()
-                    save_user_states()
-                    save_login_data()
-                    try:
-                        await callback_query.answer("✅ 所有数据已保存")
-                    except Exception as answer_e:
-                        logging.warning(f"回调查询应答失败: {answer_e}")
-                except Exception as e:
-                    try:
-                        await callback_query.answer(f"❌ 保存失败: {str(e)}")
-                    except Exception as answer_e:
-                        logging.warning(f"回调查询应答失败: {answer_e}")
-                await show_system_maintenance(callback_query.message, user_id)
-        else:
-            await handle_admin_action(callback_query.message, user_id, data)
+        # 登出功能已移除
+        try:
+            await callback_query.answer("ℹ️ 登出功能已移除", show_alert=False)
+        except Exception as e:
+            logging.warning(f"回调查询应答失败: {e}")
+    # 管理员功能已移除
     elif data == "show_frequency_settings":
         await show_frequency_settings(callback_query.message, user_id)
     elif data == "config_tail_frequency":
@@ -6062,10 +6012,10 @@ if __name__ == "__main__":
     # 启动保活服务器（仅在 Render 部署时）
     if RENDER_DEPLOYMENT:
         try:
-            run_keep_alive()
-            logging.info("Render 保活服务器已启动")
+            # keep_alive功能已移除
+            logging.info("Render 保活功能已移除")
         except Exception as e:
-            logging.warning(f"保活服务器启动失败: {e}")
+            logging.warning(f"保活功能已移除: {e}")
     
     # 初始化新搬运引擎
     if NEW_ENGINE_AVAILABLE:
@@ -6100,7 +6050,6 @@ if __name__ == "__main__":
             save_history()
             save_running_tasks()
             save_user_states()
-            save_login_data()
             if NEW_ENGINE_AVAILABLE and robust_cloning_engine:
                 robust_cloning_engine.deduplicator.save_fingerprints()
             
