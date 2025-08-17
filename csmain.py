@@ -583,6 +583,17 @@ bot_config = get_bot_config()
 print(f"🤖 启动机器人: {bot_config['bot_name']} - {bot_config['bot_version']}")
 print(f"🔑 机器人ID: {bot_config['bot_id']}")
 
+# 检查Firebase存储状态
+try:
+    from simple_firebase_storage import get_firebase_storage
+    firebase_storage = get_firebase_storage(bot_config['bot_id'])
+    if firebase_storage.is_available():
+        print(f"✅ Firebase存储已连接，项目ID: {firebase_storage.project_id}")
+    else:
+        print("⚠️ Firebase存储未连接，将使用本地存储")
+except Exception as e:
+    print(f"⚠️ Firebase存储检查失败: {e}，将使用本地存储")
+
 app = Client(f"{bot_config['bot_id']}_session", api_id=bot_config['api_id'], api_hash=bot_config['api_hash'], bot_token=bot_config['bot_token'])
 
 # ==================== 全局状态 ====================
@@ -767,22 +778,46 @@ async def cooperative_sleep(task_obj: dict, seconds: int):
 
 # ==================== 持久化函数 ====================
 def save_configs():
-    """将用户配置保存到文件"""
+    """将用户配置保存到文件和Firebase"""
+    # 1. 保存到本地文件（作为备份）
     config_file = f"user_configs_{bot_config['bot_id']}.json"
     with open(config_file, "w", encoding='utf-8') as f:
         json.dump(user_configs, f, ensure_ascii=False, indent=4)
-    logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到 {config_file}。")
+    logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到本地文件 {config_file}")
+    
+    # 2. 尝试保存到Firebase
+    try:
+        from simple_firebase_storage import save_configs_to_firebase
+        if save_configs_to_firebase(bot_config['bot_id'], user_configs):
+            logging.info(f"[{bot_config['bot_id']}] 用户配置已成功保存到Firebase")
+        else:
+            logging.warning(f"[{bot_config['bot_id']}] Firebase保存失败，仅使用本地存储")
+    except Exception as e:
+        logging.warning(f"[{bot_config['bot_id']}] Firebase保存异常: {e}，仅使用本地存储")
 
 def load_configs():
-    """从文件载入用户配置"""
+    """从文件或Firebase载入用户配置"""
     global user_configs
+    
+    # 1. 优先尝试从Firebase加载
+    try:
+        from simple_firebase_storage import load_configs_from_firebase
+        firebase_configs = load_configs_from_firebase(bot_config['bot_id'])
+        if firebase_configs:
+            user_configs = firebase_configs
+            logging.info(f"[{bot_config['bot_id']}] 从Firebase加载用户配置成功，共 {len(user_configs)} 个用户")
+            return
+    except Exception as e:
+        logging.warning(f"[{bot_config['bot_id']}] 从Firebase加载失败: {e}")
+    
+    # 2. 如果Firebase失败，从本地文件加载
     config_file = f"user_configs_{bot_config['bot_id']}.json"
     if os.path.exists(config_file):
         with open(config_file, "r", encoding="utf-8") as f:
             user_configs = json.load(f)
-        logging.info(f"[{bot_config['bot_id']}] 用户配置已从 {config_file} 载入。")
+        logging.info(f"[{bot_config['bot_id']}] 用户配置已从本地文件 {config_file} 载入，共 {len(user_configs)} 个用户")
     else:
-        logging.info(f"[{bot_config['bot_id']}] 配置文件 {config_file} 不存在，将创建新配置。")
+        logging.info(f"[{bot_config['bot_id']}] 配置文件 {config_file} 不存在，将创建新配置")
         user_configs = {}
 
 def save_user_states():
