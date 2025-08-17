@@ -650,6 +650,7 @@ user_states = {} # { user_id: [ {task_id: "...", state: "...", ...} ] }
 user_history = {} # 存储每个用户的历史记录
 listen_media_groups = {}  # {(chat_id, media_group_id): [messages]}
 realtime_dedupe_cache = {}  # 实时监听去重缓存 {(source_chat_id, target_chat_id): set()}
+processed_messages = {}  # 存储已处理的消息，防止重复处理
 # 新搬运引擎实例和状态
 robust_cloning_engine = None
 running_task_cancellation = {}  # 任务ID -> 取消标志
@@ -1732,7 +1733,7 @@ def get_feature_config_menu(user_id):
         
         # 🎛️ 按钮和界面控制
         [InlineKeyboardButton("🎛️ **按钮和界面控制**", callback_data="button_control_header")],
-        [InlineKeyboardButton(f"{button_filter_status} 按钮策略设定", callback_data="manage_filter_buttons")],
+        [InlineKeyboardButton(f"{button_filter_status} 按钮策略设置", callback_data="manage_filter_buttons")],
         
         # ✨ 内容增强功能
         [InlineKeyboardButton("✨ **内容增强功能**", callback_data="content_enhancement_header")],
