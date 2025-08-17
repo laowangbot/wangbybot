@@ -596,12 +596,15 @@ PERFORMANCE_MODE = "aggressive"  # 可选: "conservative", "balanced", "aggressi
 ENABLE_USERNAME_LOGIN = True  # 启用用户名登录
 AUTHORIZED_USERNAMES = ["admin"]  # 授权用户名列表（只保留admin）
 ADMIN_USERNAMES = ["admin"]  # 管理员用户名列表
-LOGIN_SESSION_TIMEOUT = 30 * 24 * 3600  # 登录会话超时时间（30天）
+LOGIN_SESSION_TIMEOUT = 365 * 24 * 3600  # 登录会话超时时间（1年，几乎永不过期）
 
 # 密码验证配置（更安全的方式）
 USER_CREDENTIALS = {
     "admin": "159413"  # 用户名: 密码
 }
+
+# 自动保存配置间隔（秒）
+AUTO_SAVE_INTERVAL = 60  # 每60秒自动保存一次配置
 
 # ==================== 多机器人配置管理 ====================
 def get_bot_config():
@@ -661,6 +664,35 @@ login_attempts = {}   # {user_id: {"attempts": count, "last_attempt": timestamp,
 pending_logins = {}   # {user_id: {"waiting_for_username": True}}
 
 # ==================== 登录系统功能 ====================
+def auto_save_all_configs():
+    """自动保存所有配置到文件"""
+    try:
+        save_configs()
+        save_user_states()
+        save_history()
+        save_login_data()
+        logging.debug("自动保存配置完成")
+    except Exception as e:
+        logging.error(f"自动保存配置失败: {e}")
+
+def start_auto_save_thread():
+    """启动自动保存配置线程"""
+    import threading
+    import time
+    
+    def auto_save_worker():
+        while True:
+            try:
+                time.sleep(AUTO_SAVE_INTERVAL)
+                auto_save_all_configs()
+            except Exception as e:
+                logging.error(f"自动保存线程出错: {e}")
+                time.sleep(10)  # 出错后等待10秒再试
+    
+    auto_save_thread = threading.Thread(target=auto_save_worker, daemon=True)
+    auto_save_thread.start()
+    logging.info(f"自动保存配置线程已启动，间隔: {AUTO_SAVE_INTERVAL}秒")
+
 def save_login_data():
     # 优先使用内存存储
     if memory_storage:
@@ -7299,6 +7331,10 @@ if __name__ == "__main__":
     heartbeat_thread = threading.Thread(target=start_heartbeat, daemon=True)
     heartbeat_thread.start()
     print(f"💓 [{bot_config['bot_id']}] 心跳机制已启动，每10分钟发送一次请求")
+    
+    # 启动自动保存配置线程
+    start_auto_save_thread()
+    print(f"💾 [{bot_config['bot_id']}] 自动保存配置线程已启动，每{AUTO_SAVE_INTERVAL}秒保存一次")
     
     load_configs()
     load_history()
