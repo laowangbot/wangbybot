@@ -435,16 +435,6 @@ class FloodWaitManager:
 
 # 创建全局FloodWait管理器实例
 flood_wait_manager = FloodWaitManager()
-# 创建内存存储管理器实例
-memory_storage = None
-if MEMORY_STORAGE_AVAILABLE:
-    try:
-        memory_storage = MemoryStorageManager(bot_config['bot_id'], backup_interval=300)
-        logging.info(f"[{bot_config['bot_id']}] 内存存储管理器已初始化")
-    except Exception as e:
-        logging.error(f"[{bot_config['bot_id']}] 内存存储管理器初始化失败: {e}")
-        memory_storage = None
-
 
 # 全局消息处理记录，防止重复处理
 processed_messages = {}
@@ -491,15 +481,6 @@ def get_performance_stats():
 # 导入新的搬运引擎
 try:
     from new_cloning_engine import RobustCloningEngine, MessageDeduplicator
-# 导入内存存储管理器
-try:
-    from memory_storage_manager import MemoryStorageManager
-    MEMORY_STORAGE_AVAILABLE = True
-    logging.info("内存存储管理器已加载")
-except ImportError as e:
-    MEMORY_STORAGE_AVAILABLE = False
-    logging.warning(f"内存存储管理器加载失败: {e}")
-
     NEW_ENGINE_AVAILABLE = True
     logging.info("新搬运引擎已加载")
 except ImportError as e:
@@ -694,16 +675,6 @@ pending_logins = {}   # {user_id: {"waiting_for_username": True}}
 
 # ==================== 登录系统功能 ====================
 def save_login_data():
-    # 优先使用内存存储
-    if memory_storage:
-        try:
-            memory_storage.set_config("login_data", login_data)
-            logging.info(f"[{bot_config['bot_id']}] login_data 已保存到内存存储")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储保存失败: {e}")
-    
-    # 回退到文件存储
     """保存登录数据到文件"""
     try:
         login_file = get_config_path(f"user_login_{bot_config['bot_id']}.json")
@@ -718,19 +689,6 @@ def save_login_data():
         logging.error(f"[{bot_config['bot_id']}] 保存登录数据失败: {e}")
 
 def load_login_data():
-    # 优先从内存存储恢复
-    if memory_storage:
-        try:
-            restored = memory_storage.restore_from_backup("login_data")
-            if restored:
-                global login_data
-                login_data = memory_storage.get_config("login_data")
-                logging.info(f"[{bot_config['bot_id']}] login_data 已从内存存储恢复")
-                return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储恢复失败: {e}")
-    
-    # 回退到文件加载
     """从文件加载登录数据"""
     global logged_in_users, login_attempts
     try:
@@ -1426,33 +1384,11 @@ async def cooperative_sleep(task_obj: dict, seconds: int):
 # ==================== 持久化函数 ====================
 def save_configs():
     """将用户配置保存到文件"""
-    global user_configs
-    
-    # 优先使用内存存储
-    if memory_storage:
-        try:
-            memory_storage.set_config("user_configs", user_configs)
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到内存存储")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储保存失败: {e}")
-    
-    # 回退到文件存储
     config_file = get_config_path(f"user_configs_{bot_config['bot_id']}.json")
     try:
         with open(config_file, "w", encoding='utf-8') as f:
             json.dump(user_configs, f, ensure_ascii=False, indent=4)
-        logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到文件 {config_file}")
-    except Exception as e:
-        logging.error(f"[{bot_config['bot_id']}] 保存用户配置失败: {e}")
-        # 尝试保存到当前目录作为备份
-        backup_file = f"user_configs_{bot_config['bot_id']}.json"
-        try:
-            with open(backup_file, "w", encoding='utf-8') as f:
-                json.dump(user_configs, f, ensure_ascii=False, indent=4)
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到备份文件 {backup_file}")
-        except Exception as backup_e:
-            logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")] 用户配置已保存到 {config_file}。")
+        logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到 {config_file}。")
     except Exception as e:
         logging.error(f"[{bot_config['bot_id']}] 保存用户配置失败: {e}")
         # 尝试保存到当前目录作为备份
@@ -1467,51 +1403,7 @@ def save_configs():
 def load_configs():
     """从文件载入用户配置"""
     global user_configs
-    
-    # 优先从内存存储恢复
-    if memory_storage:
-        try:
-            restored = memory_storage.restore_from_backup("user_configs")
-            if restored:
-                user_configs = memory_storage.get_config("user_configs")
-                logging.info(f"[{bot_config['bot_id']}] 用户配置已从内存存储恢复")
-                return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储恢复失败: {e}")
-    
-    # 回退到文件加载
     config_file = get_config_path(f"user_configs_{bot_config['bot_id']}.json")
-    backup_file = f"user_configs_{bot_config['bot_id']}.json"
-    
-    # 首先尝试从持久化存储加载
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, "r", encoding='utf-8') as f:
-                user_configs = json.load(f)
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已从持久化存储 {config_file} 载入")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 从持久化存储加载配置失败: {e}")
-    
-    # 如果持久化存储失败，尝试从备份文件加载
-    if os.path.exists(backup_file):
-        try:
-            with open(backup_file, "r", encoding='utf-8') as f:
-                user_configs = json.load(f)
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已从备份文件 {backup_file} 载入")
-            # 尝试保存到持久化存储
-            try:
-                save_configs()
-                logging.info(f"[{bot_config['bot_id']}] 配置已迁移到持久化存储")
-            except Exception as migrate_e:
-                logging.error(f"[{bot_config['bot_id']}] 迁移到持久化存储失败: {migrate_e}")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 从备份文件加载配置失败: {e}")
-    
-    # 如果都失败，创建新配置
-    logging.info(f"[{bot_config['bot_id']}] 配置文件不存在，将创建新配置")
-    user_configs = {}.json")
     backup_file = f"user_configs_{bot_config['bot_id']}.json"
     
     # 首先尝试从持久化存储加载
@@ -1545,16 +1437,6 @@ def load_configs():
     user_configs = {}
 
 def save_user_states():
-    # 优先使用内存存储
-    if memory_storage:
-        try:
-            memory_storage.set_config("user_states", user_states)
-            logging.info(f"[{bot_config['bot_id']}] user_states 已保存到内存存储")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储保存失败: {e}")
-    
-    # 回退到文件存储
     """将用户状态保存到文件"""
     try:
         config_file = get_config_path(f"user_states_{bot_config['bot_id']}.json")
@@ -1573,19 +1455,6 @@ def save_user_states():
             logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")
 
 def load_user_states():
-    # 优先从内存存储恢复
-    if memory_storage:
-        try:
-            restored = memory_storage.restore_from_backup("user_states")
-            if restored:
-                global user_states
-                user_states = memory_storage.get_config("user_states")
-                logging.info(f"[{bot_config['bot_id']}] user_states 已从内存存储恢复")
-                return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储恢复失败: {e}")
-    
-    # 回退到文件加载
     """从文件载入用户状态"""
     global user_states
     try:
@@ -1602,16 +1471,6 @@ def load_user_states():
         user_states = {}
 
 def save_history():
-    # 优先使用内存存储
-    if memory_storage:
-        try:
-            memory_storage.set_config("history", history)
-            logging.info(f"[{bot_config['bot_id']}] history 已保存到内存存储")
-            return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储保存失败: {e}")
-    
-    # 回退到文件存储
     """将历史记录保存到文件"""
     config_file = get_config_path(f"user_history_{bot_config['bot_id']}.json")
     try:
@@ -1630,19 +1489,6 @@ def save_history():
             logging.error(f"[{bot_config['bot_id']}] 保存备份文件也失败: {backup_e}")
 
 def load_history():
-    # 优先从内存存储恢复
-    if memory_storage:
-        try:
-            restored = memory_storage.restore_from_backup("history")
-            if restored:
-                global history
-                history = memory_storage.get_config("history")
-                logging.info(f"[{bot_config['bot_id']}] history 已从内存存储恢复")
-                return
-        except Exception as e:
-            logging.error(f"[{bot_config['bot_id']}] 内存存储恢复失败: {e}")
-    
-    # 回退到文件加载
     """从文件载入历史记录"""
     global user_history
     config_file = get_config_path(f"user_history_{bot_config['bot_id']}.json")
@@ -2681,78 +2527,6 @@ async def reset_login_command(client, message):
         "如果遇到重复登录问题，请使用此命令重置。"
     )
 
-
-
-@app.on_message(filters.command("backup") & filters.private)
-async def backup_command(client, message):
-    """手动备份配置"""
-    user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
-    
-    if not is_admin_user(user_id):
-        await message.reply("❌ 您没有管理员权限")
-        return
-    
-    if memory_storage:
-        try:
-            memory_storage.force_backup_all()
-            await message.reply("✅ 配置备份已完成！")
-        except Exception as e:
-            await message.reply(f"❌ 备份失败: {str(e)}")
-    else:
-        await message.reply("❌ 内存存储管理器未启用")
-
-@app.on_message(filters.command("restore") & filters.private)
-async def restore_command(client, message):
-    """从备份恢复配置"""
-    user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
-    
-    if not is_admin_user(user_id):
-        await message.reply("❌ 您没有管理员权限")
-        return
-    
-    if memory_storage:
-        try:
-            restored_count = memory_storage.restore_all_from_backup()
-            await message.reply(f"✅ 配置恢复完成！成功恢复 {restored_count}/5 个配置")
-        except Exception as e:
-            await message.reply(f"❌ 恢复失败: {str(e)}")
-    else:
-        await message.reply("❌ 内存存储管理器未启用")
-
-@app.on_message(filters.command("storage") & filters.private)
-async def storage_status_command(client, message):
-    """查看存储状态"""
-    user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
-    
-    if not is_admin_user(user_id):
-        await message.reply("❌ 您没有管理员权限")
-        return
-    
-    if memory_storage:
-        try:
-            status = memory_storage.get_backup_status()
-            status_text = "🔍 **存储状态检查**\n\n"
-            status_text += f"📱 **内存存储**: {'✅ 已启用' if status['github_backup_enabled'] else '❌ 未启用'}\n"
-            status_text += f"⏰ **备份间隔**: {status['backup_interval']}秒\n\n"
-            status_text += "📊 **备份状态**:\n"
-            
-            for config_type, last_time in status['last_backup'].items():
-                status_text += f"• {config_type}: {last_time}\n"
-            
-            await message.reply(status_text)
-        except Exception as e:
-            await message.reply(f"❌ 获取状态失败: {str(e)}")
-    else:
-        await message.reply("❌ 内存存储管理器未启用")
 
 @app.on_message(filters.command("configstatus") & filters.private)
 async def config_status_command(client, message):
