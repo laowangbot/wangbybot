@@ -551,16 +551,7 @@ PERFORMANCE_MODE = "aggressive"  # 可选: "conservative", "balanced", "aggressi
 # balanced: 平衡模式，性能和稳定性的折中
 # aggressive: 激进模式，最大化性能，可能触发API限制
 
-# 用户名登录系统配置
-ENABLE_USERNAME_LOGIN = True  # 启用用户名登录
-AUTHORIZED_USERNAMES = ["admin"]  # 授权用户名列表（只保留admin）
-ADMIN_USERNAMES = ["admin"]  # 管理员用户名列表
-LOGIN_SESSION_TIMEOUT = 30 * 24 * 3600  # 登录会话超时时间（30天）
-
-# 密码验证配置（更安全的方式）
-USER_CREDENTIALS = {
-    "admin": "159413"  # 用户名: 密码
-}
+# 登录系统已完全移除 - 所有用户可直接使用机器人
 
 # ==================== 多机器人配置管理 ====================
 def get_bot_config():
@@ -604,585 +595,45 @@ realtime_dedupe_cache = {}  # 实时监听去重缓存 {(source_chat_id, target_
 robust_cloning_engine = None
 running_task_cancellation = {}  # 任务ID -> 取消标志
 
-# 登录系统状态
-logged_in_users = {}  # {user_id: {"username": "用户名", "login_time": timestamp, "last_active": timestamp}}
-login_attempts = {}   # {user_id: {"attempts": count, "last_attempt": timestamp, "locked_until": timestamp}}
-pending_logins = {}   # {user_id: {"waiting_for_username": True}}
+# 登录系统已移除 - 所有用户可直接使用
 
 # ==================== 登录系统功能 ====================
-def save_login_data():
-    """保存登录数据到文件"""
-    try:
-        login_file = get_config_path(f"user_login_{bot_config['bot_id']}.json")
-        login_data = {
-            "logged_in_users": logged_in_users,
-            "login_attempts": login_attempts
-        }
-        with open(login_file, "w", encoding="utf-8") as f:
-            json.dump(login_data, f, ensure_ascii=False, indent=4)
-        logging.info(f"[{bot_config['bot_id']}] 登录数据已保存到 {login_file}")
-    except Exception as e:
-        logging.error(f"[{bot_config['bot_id']}] 保存登录数据失败: {e}")
+# 登录数据保存和加载功能已移除
 
-def load_login_data():
-    """从文件加载登录数据"""
-    global logged_in_users, login_attempts
-    try:
-        login_file = get_config_path(f"user_login_{bot_config['bot_id']}.json")
-        if os.path.exists(login_file):
-            with open(login_file, "r", encoding="utf-8") as f:
-                login_data = json.load(f)
-                logged_in_users = login_data.get("logged_in_users", {})
-                login_attempts = login_data.get("login_attempts", {})
-            logging.info(f"[{bot_config['bot_id']}] 登录数据已从 {login_file} 加载")
-        else:
-            logging.info(f"[{bot_config['bot_id']}] 登录文件 {login_file} 不存在，将创建新登录数据")
-            logged_in_users = {}
-            login_attempts = {}
-    except Exception as e:
-        logging.error(f"[{bot_config['bot_id']}] 加载登录数据失败: {e}")
-        logged_in_users = {}
-        login_attempts = {}
+# 用户登录和管理员检查功能已移除
 
-def is_user_logged_in(user_id):
-    """检查用户是否已登录且会话有效"""
-    if not ENABLE_USERNAME_LOGIN:
-        return True
-    
-    user_id_str = str(user_id)
-    if user_id_str not in logged_in_users:
-        return False
-    
-    user_data = logged_in_users[user_id_str]
-    login_time = user_data.get("login_time", 0)
-    current_time = time.time()
-    
-    # 检查会话是否过期
-    if current_time - login_time > LOGIN_SESSION_TIMEOUT:
-        del logged_in_users[user_id_str]
-        save_login_data()
-        return False
-    
-    return True
+# 登录尝试和记录功能已移除
 
-def is_admin_user(user_id):
-    """检查用户是否为管理员"""
-    if not is_user_logged_in(user_id):
-        return False
-    
-    user_id_str = str(user_id)
-    if user_id_str in logged_in_users:
-        username = logged_in_users[user_id_str].get("username", "")
-        return username in ADMIN_USERNAMES
-    return False
+# 用户登录功能已移除
 
-def can_attempt_login(user_id):
-    """检查用户是否可以尝试登录（锁定功能已禁用）"""
-    # 锁定功能已禁用，所有用户都可以尝试登录
-    return True
+# 用户活动和登出功能已移除
 
-def record_login_attempt(user_id, success=False):
-    """记录登录尝试（锁定功能已禁用）"""
-    user_id_str = str(user_id)
-    current_time = time.time()
+# 所有登录相关功能已移除
+# 登录界面已移除
     
-    if user_id_str not in login_attempts:
-        login_attempts[user_id_str] = {"attempts": 0, "last_attempt": 0, "locked_until": 0}
-    
-    attempt_data = login_attempts[user_id_str]
-    attempt_data["last_attempt"] = current_time
-    
-    if success:
-        # 登录成功，清空失败记录
-        attempt_data["attempts"] = 0
-        attempt_data["locked_until"] = 0
-    else:
-        # 登录失败，但不锁定账户
-        attempt_data["attempts"] += 1
-        # 锁定功能已禁用
-    
-    save_login_data()
+# 登录等待状态已移除
+# 用户名输入处理功能已移除
 
-def login_user(user_id, username):
-    """用户登录"""
-    user_id_str = str(user_id)
-    current_time = time.time()
-    
-    logged_in_users[user_id_str] = {
-        "username": username,
-        "login_time": current_time,
-        "last_active": current_time
-    }
-    
-    record_login_attempt(user_id, success=True)
-    save_login_data()
-    
-    logging.info(f"用户 {user_id} 以用户名 '{username}' 成功登录")
+# 登录装饰器功能已移除
 
-def update_user_activity(user_id):
-    """更新用户活动时间"""
-    if is_user_logged_in(user_id):
-        user_id_str = str(user_id)
-        logged_in_users[user_id_str]["last_active"] = time.time()
+# 用户登出功能已移除
 
-def logout_user(user_id):
-    """用户登出"""
-    user_id_str = str(user_id)
-    if user_id_str in logged_in_users:
-        username = logged_in_users[user_id_str].get("username", "Unknown")
-        del logged_in_users[user_id_str]
-        save_login_data()
-        logging.info(f"用户 {user_id} (用户名: {username}) 已登出")
+# 管理员面板功能已移除
 
-def get_logged_in_username(user_id):
-    """获取已登录用户的用户名"""
-    user_id_str = str(user_id)
-    if user_id_str in logged_in_users:
-        return logged_in_users[user_id_str].get("username", "Unknown")
-    return None
+# 管理员操作处理功能已移除
 
-async def show_login_screen(message):
-    """显示登录界面"""
-    user_id = message.from_user.id
-    
-    # 锁定检查已禁用，直接显示登录界面
-    
-    # 检查是否有失败记录
-    attempts_info = ""
-    user_id_str = str(user_id)
-    if user_id_str in login_attempts:
-        attempts = login_attempts[user_id_str].get("attempts", 0)
-        if attempts > 0:
-            attempts_info = f"\n⚠️ 登录失败次数：{attempts}/3"
-    
-    await message.reply_text(
-        f"🔐 **机器人访问验证**\n\n"
-        f"请按以下格式输入登录信息：{attempts_info}\n"
-        f"格式：`用户名:密码`\n"
-        f"例如：`demo:demo123`\n\n"
-        f"💡 如需获取账号，请联系管理员",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("ℹ️ 联系管理员", url="https://t.me/your_admin_contact")
-        ]])
-    )
-    
-    # 标记用户正在等待输入用户名
-    pending_logins[user_id] = {"waiting_for_username": True}
+# 用户管理功能已移除
 
-async def handle_username_input(message):
-    """处理用户名:密码输入"""
-    user_id = message.from_user.id
-    login_input = message.text.strip()
-    
-    # 清除等待状态
-    pending_logins.pop(user_id, None)
-    
-    if not can_attempt_login(user_id):
-        await show_login_screen(message)
-        return
-    
-    # 验证输入格式：用户名:密码
-    if ":" not in login_input:
-        # 格式错误
-        await message.reply_text(
-            f"❌ **格式错误**\n\n"
-            f"请使用正确格式：`用户名:密码`\n"
-            f"例如：`demo:demo123`\n\n"
-            f"请重新输入："
-        )
-        pending_logins[user_id] = {"waiting_for_username": True}
-        return
-    
-    try:
-        username, password = login_input.split(":", 1)
-        username = username.strip()
-        password = password.strip()
-    except ValueError:
-        await message.reply_text(
-            f"❌ **格式错误**\n\n"
-            f"请使用正确格式：`用户名:密码`\n"
-            f"请重新输入："
-        )
-        pending_logins[user_id] = {"waiting_for_username": True}
-        return
-    
-    # 验证用户名和密码
-    if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
-        # 登录成功
-        login_user(user_id, username)
-        
-        is_admin = username in ADMIN_USERNAMES
-        admin_text = "\n👑 您拥有管理员权限" if is_admin else ""
-        
-        await message.reply_text(
-            f"✅ **登录成功**\n\n"
-            f"欢迎，{username}！{admin_text}\n"
-            f"您现在可以使用机器人的所有功能。",
-            reply_markup=get_main_menu_buttons(user_id)
-        )
-    else:
-        # 登录失败
-        record_login_attempt(user_id, success=False)
-        
-        user_id_str = str(user_id)
-        attempts = login_attempts[user_id_str].get("attempts", 0)
-        
-        if attempts >= 3:
-            await message.reply_text(
-                f"❌ **登录失败**\n\n"
-                f"用户名或密码错误。\n"
-                f"🔒 由于多次失败，账户已被锁定1小时。"
-            )
-        else:
-            remaining_attempts = 3 - attempts
-            await message.reply_text(
-                f"❌ **登录失败**\n\n"
-                f"用户名或密码错误。\n"
-                f"剩余尝试次数：{remaining_attempts}\n\n"
-                f"请重新输入（格式：`用户名:密码`）："
-            )
-            
-            if remaining_attempts > 0:
-                # 重新显示登录界面
-                pending_logins[user_id] = {"waiting_for_username": True}
+# 详细统计功能已移除
 
-def require_login(func):
-    """登录装饰器 - 要求用户必须登录才能访问功能"""
-    async def wrapper(*args, **kwargs):
-        # 从参数中提取user_id
-        user_id = None
-        if args:
-            if hasattr(args[0], 'from_user'):  # Message对象
-                user_id = args[0].from_user.id
-            elif hasattr(args[0], 'message') and hasattr(args[0].message, 'from_user'):  # CallbackQuery对象
-                user_id = args[0].message.from_user.id
-            elif len(args) > 1 and isinstance(args[1], int):  # 直接传入的user_id
-                user_id = args[1]
-        
-        if user_id and not is_user_logged_in(user_id):
-            # 用户未登录，显示登录界面
-            if hasattr(args[0], 'reply_text'):
-                await show_login_screen(args[0])
-            elif hasattr(args[0], 'message'):
-                await show_login_screen(args[0].message)
-            return
-        
-        # 更新用户活动时间
-        if user_id:
-            update_user_activity(user_id)
-        
-        return await func(*args, **kwargs)
-    return wrapper
+# 系统设置功能已移除
 
-async def handle_logout(message, user_id):
-    """处理用户登出"""
-    username = get_logged_in_username(user_id)
-    logout_user(user_id)
-    
-    await safe_edit_or_reply(message,
-        f"👋 **再见，{username}！**\n\n"
-        f"您已成功退出登录。\n"
-        f"感谢使用本机器人！",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔐 重新登录", callback_data="refresh_login_status")
-        ]])
-    )
+# 登录日志功能已移除
 
-async def show_admin_panel(message, user_id):
-    """显示管理员控制面板"""
-    if not is_admin_user(user_id):
-        await safe_edit_or_reply(message, "❌ 您没有管理员权限")
-        return
-    
-    # 统计信息
-    total_users = len(logged_in_users)
-    total_authorized = len(AUTHORIZED_USERNAMES)
-    total_admins = len(ADMIN_USERNAMES)
-    
-    # 在线用户列表
-    online_users = []
-    current_time = time.time()
-    for uid, data in logged_in_users.items():
-        last_active = data.get("last_active", 0)
-        if current_time - last_active < 300:  # 5分钟内活跃
-            online_users.append(data.get("username", "Unknown"))
-    
-    # 获取性能统计
-    perf_stats = get_performance_stats()
-    
-    text = (
-        f"👑 **管理员控制面板**\n\n"
-        f"📊 **系统统计：**\n"
-        f"• 当前登录用户：{total_users} 人\n"
-        f"• 授权用户总数：{total_authorized} 人\n"
-        f"• 管理员总数：{total_admins} 人\n"
-        f"• 在线用户：{len(online_users)} 人\n\n"
-        f"⚡ **性能监控：**\n"
-        f"• 监控函数：{len(perf_stats)} 个\n"
-    )
-    
-    # 显示最慢的3个操作
-    if perf_stats:
-        sorted_perf = sorted(perf_stats.items(), key=lambda x: x[1]['avg'], reverse=True)[:3]
-        text += "• 最慢操作：\n"
-        for func_name, stats in sorted_perf:
-            text += f"  - {func_name}: {stats['avg']:.2f}s (avg)\n"
-    
-    text += "\n🟢 **当前在线：**\n"
-    
-    if online_users:
-        text += "• " + "\n• ".join(online_users[:10])
-        if len(online_users) > 10:
-            text += f"\n... 还有 {len(online_users) - 10} 人"
-    else:
-        text += "暂无在线用户"
-    
-    buttons = [
-        [
-            InlineKeyboardButton("👥 用户管理", callback_data="admin_user_management"),
-            InlineKeyboardButton("📊 详细统计", callback_data="admin_statistics")
-        ],
-        [
-            InlineKeyboardButton("⚙️ 系统设置", callback_data="admin_system_settings"),
-            InlineKeyboardButton("📋 登录日志", callback_data="admin_login_logs")
-        ],
-        [
-            InlineKeyboardButton("⚡ 性能监控", callback_data="admin_performance"),
-            InlineKeyboardButton("🔧 系统维护", callback_data="admin_maintenance")
-        ],
-        [InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")]
-    ]
-    
-    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+# 性能监控功能已移除
 
-async def handle_admin_action(message, user_id, action):
-    """处理管理员操作"""
-    if not is_admin_user(user_id):
-        await safe_edit_or_reply(message, "❌ 您没有管理员权限")
-        return
-    
-    if action == "admin_user_management":
-        await show_user_management(message, user_id)
-    elif action == "admin_statistics":
-        await show_detailed_statistics(message, user_id)
-    elif action == "admin_system_settings":
-        await show_system_settings(message, user_id)
-    elif action == "admin_login_logs":
-        await show_login_logs(message, user_id)
-    elif action == "admin_performance":
-        await show_performance_monitor(message, user_id)
-    elif action == "admin_maintenance":
-        await show_system_maintenance(message, user_id)
-
-async def show_user_management(message, user_id):
-    """显示用户管理界面"""
-    text = "👥 **用户管理**\n\n"
-    text += f"🔑 **授权用户列表：**\n"
-    
-    for i, username in enumerate(AUTHORIZED_USERNAMES, 1):
-        is_admin = "👑" if username in ADMIN_USERNAMES else "👤"
-        is_online = "🟢" if any(data.get("username") == username for data in logged_in_users.values()) else "⚪"
-        text += f"{i}. {is_admin} {is_online} {username}\n"
-    
-    text += f"\n💡 提示：🟢=在线 ⚪=离线 👑=管理员 👤=普通用户"
-    
-    buttons = [
-        [InlineKeyboardButton("🔙 返回管理面板", callback_data="show_admin_panel")]
-    ]
-    
-    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-async def show_detailed_statistics(message, user_id):
-    """显示详细统计信息"""
-    current_time = time.time()
-    
-    # 统计登录用户的活跃度
-    active_1h = sum(1 for data in logged_in_users.values() if current_time - data.get("last_active", 0) < 3600)
-    active_24h = sum(1 for data in logged_in_users.values() if current_time - data.get("last_active", 0) < 86400)
-    
-    # 统计配置的频道组数量
-    total_pairs = sum(len(cfg.get("channel_pairs", [])) for cfg in user_configs.values())
-    
-    # 统计任务数量
-    active_tasks = sum(len(tasks) for tasks in user_states.values())
-    saved_tasks = sum(len(tasks) for tasks in running_tasks.values())
-    
-    text = (
-        f"📊 **详细统计信息**\n\n"
-        f"👥 **用户活跃度：**\n"
-        f"• 1小时内活跃：{active_1h} 人\n"
-        f"• 24小时内活跃：{active_24h} 人\n"
-        f"• 总登录用户：{len(logged_in_users)} 人\n\n"
-        f"📋 **系统使用情况：**\n"
-        f"• 配置的频道组：{total_pairs} 个\n"
-        f"• 活跃任务：{active_tasks} 个\n"
-        f"• 保存的任务：{saved_tasks} 个\n\n"
-        f"🔐 **安全信息：**\n"
-        f"• 失败登录记录：{len(login_attempts)} 个\n"
-        f"• 授权用户数：{len(AUTHORIZED_USERNAMES)} 人\n"
-        f"• 管理员数：{len(ADMIN_USERNAMES)} 人"
-    )
-    
-    buttons = [
-        [InlineKeyboardButton("🔙 返回管理面板", callback_data="show_admin_panel")]
-    ]
-    
-    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-async def show_system_settings(message, user_id):
-    """显示系统设置"""
-    text = (
-        f"⚙️ **系统设置**\n\n"
-        f"🔐 **登录系统：**\n"
-        f"• 登录验证：{'✅ 启用' if ENABLE_USERNAME_LOGIN else '❌ 禁用'}\n"
-        f"• 会话超时：{LOGIN_SESSION_TIMEOUT // 3600} 小时\n"
-        f"• 最大失败次数：3 次\n"
-        f"• 锁定时间：1 小时\n\n"
-        f"⚡ **性能设置：**\n"
-        f"• 批量发送大小：{BATCH_SEND_SIZE}\n"
-        f"• 最小发送间隔：{MIN_INTERVAL} 秒\n"
-        f"• 流量限制阈值：{FLOOD_WAIT_THRESHOLD} 秒\n\n"
-        f"💾 **数据文件：**\n"
-        f"• user_login.json - 登录数据\n"
-        f"• user_configs.json - 用户配置\n"
-        f"• user_history.json - 历史记录\n"
-        f"• running_tasks.json - 运行任务"
-    )
-    
-    buttons = [
-        [InlineKeyboardButton("🔙 返回管理面板", callback_data="show_admin_panel")]
-    ]
-    
-    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-async def show_login_logs(message, user_id):
-    """显示登录日志"""
-    text = "📋 **登录日志**\n\n"
-    
-    if not login_attempts:
-        text += "暂无登录记录"
-    else:
-        text += "🔍 **最近登录尝试：**\n"
-        sorted_attempts = sorted(login_attempts.items(), key=lambda x: x[1].get("last_attempt", 0), reverse=True)
-        
-        for user_id_str, data in sorted_attempts[:10]:
-            attempts = data.get("attempts", 0)
-            last_attempt = data.get("last_attempt", 0)
-            locked_until = data.get("locked_until", 0)
-            
-            time_str = time.strftime("%m-%d %H:%M", time.localtime(last_attempt)) if last_attempt else "未知"
-            status = "🔒 锁定" if locked_until > time.time() else f"❌ {attempts}次失败" if attempts > 0 else "✅ 正常"
-            
-            text += f"• ID {user_id_str}: {status} ({time_str})\n"
-        
-        if len(login_attempts) > 10:
-            text += f"\n... 还有 {len(login_attempts) - 10} 条记录"
-    
-    buttons = [
-        [InlineKeyboardButton("🔙 返回管理面板", callback_data="show_admin_panel")]
-    ]
-    
-    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-async def show_performance_monitor(message, user_id):
-    """显示性能监控面板"""
-    if not is_admin_user(user_id):
-        await safe_edit_or_reply(message, "❌ 您没有管理员权限")
-        return
-    
-    perf_stats = get_performance_stats()
-    
-    text = "⚡ **性能监控面板**\n\n"
-    
-    if not perf_stats:
-        text += "📊 暂无性能数据"
-    else:
-        text += f"📊 **监控概览** (共 {len(perf_stats)} 个函数)\n\n"
-        
-        # 按平均耗时排序
-        sorted_stats = sorted(perf_stats.items(), key=lambda x: x[1]['avg'], reverse=True)
-        
-        text += "🐌 **最慢操作 (Top 5):**\n"
-        for func_name, stats in sorted_stats[:5]:
-            text += f"• `{func_name}`: {stats['avg']:.2f}s (avg) | {stats['max']:.2f}s (max) | {stats['count']} 次\n"
-        
-        text += "\n⚡ **最快操作 (Top 3):**\n"
-        for func_name, stats in sorted_stats[-3:]:
-            text += f"• `{func_name}`: {stats['avg']:.3f}s (avg) | {stats['count']} 次\n"
-        
-        # 总体统计
-        total_calls = sum(stats['count'] for stats in perf_stats.values())
-        avg_duration = sum(stats['avg'] * stats['count'] for stats in perf_stats.values()) / total_calls if total_calls > 0 else 0
-        
-        text += f"\n📈 **总体统计:**\n"
-        text += f"• 总调用次数: {total_calls}\n"
-        text += f"• 平均耗时: {avg_duration:.3f}s\n"
-        text += f"• 监控函数数: {len(perf_stats)}\n"
-    
-    buttons = [
-        [InlineKeyboardButton("🔄 刷新数据", callback_data="admin_performance")],
-        [InlineKeyboardButton("🗑️ 清空统计", callback_data="admin_clear_performance")],
-        [InlineKeyboardButton("🔙 返回管理面板", callback_data="show_admin_panel")]
-    ]
-    
-    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-async def show_system_maintenance(message, user_id):
-    """显示系统维护面板"""
-    if not is_admin_user(user_id):
-        await safe_edit_or_reply(message, "❌ 您没有管理员权限")
-        return
-    
-    # 获取系统状态
-    import psutil
-    import gc
-    
-    # 内存使用情况
-    memory_info = psutil.virtual_memory()
-    memory_percent = memory_info.percent
-    memory_used = memory_info.used / (1024**3)  # GB
-    memory_total = memory_info.total / (1024**3)  # GB
-    
-    # CPU使用情况
-    cpu_percent = psutil.cpu_percent(interval=1)
-    
-    # 磁盘使用情况
-    disk_info = psutil.disk_usage('/')
-    disk_percent = (disk_info.used / disk_info.total) * 100
-    disk_used = disk_info.used / (1024**3)  # GB
-    disk_total = disk_info.total / (1024**3)  # GB
-    
-    # 垃圾回收统计
-    gc_stats = gc.get_stats()
-    
-    text = (
-        f"🔧 **系统维护面板**\n\n"
-        f"💾 **内存使用:**\n"
-        f"• 使用率: {memory_percent:.1f}%\n"
-        f"• 已用: {memory_used:.2f} GB / {memory_total:.2f} GB\n\n"
-        f"🖥️ **CPU使用:**\n"
-        f"• 使用率: {cpu_percent:.1f}%\n\n"
-        f"💿 **磁盘使用:**\n"
-        f"• 使用率: {disk_percent:.1f}%\n"
-        f"• 已用: {disk_used:.2f} GB / {disk_total:.2f} GB\n\n"
-        f"🗑️ **垃圾回收:**\n"
-        f"• 代数0: {gc_stats[0]['collections']} 次\n"
-        f"• 代数1: {gc_stats[1]['collections']} 次\n"
-        f"• 代数2: {gc_stats[2]['collections']} 次\n\n"
-        f"📊 **缓存状态:**\n"
-        f"• 实时去重缓存: {len(realtime_dedupe_cache)} 个\n"
-        f"• 性能统计: {len(performance_stats)} 个函数\n"
-    )
-    
-    buttons = [
-        [InlineKeyboardButton("🗑️ 执行垃圾回收", callback_data="admin_gc_collect")],
-        [InlineKeyboardButton("🧹 清理缓存", callback_data="admin_clear_cache")],
-        [InlineKeyboardButton("💾 保存所有数据", callback_data="admin_save_all")],
-        [InlineKeyboardButton("🔄 刷新状态", callback_data="admin_maintenance")],
-        [InlineKeyboardButton("🔙 返回管理面板", callback_data="show_admin_panel")]
-    ]
-    
-    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+# 系统维护功能已移除
+# 系统维护按钮已移除
 
 # ==================== 通用辅助 ====================
 def parse_channel_identifier(raw: str):
@@ -2285,16 +1736,10 @@ async def start_command(client, message):
     user_id = message.from_user.id
     logging.info(f"用户 {user_id} 启动机器人。")
     
-    # 检查登录状态
-    if not is_user_logged_in(user_id):
-        await show_login_screen(message)
-        return
-    
-    # 更新用户活动时间
-    update_user_activity(user_id)
+    # 登录检查已移除，所有用户可直接使用
     
     # 获取用户名用于欢迎消息
-    username = get_logged_in_username(user_id)
+    username = f"用户{user_id}"
     
     # 仅清理非进行中的任务，保留正在搬运的任务，避免进度更新中断
     if user_id in user_states:
@@ -2342,9 +1787,7 @@ async def history_command(client, message):
 @app.on_message(filters.command("debug") & filters.private)
 async def debug_command(client, message):
     user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
+    # 登录检查已移除
     
     cfg = user_configs.get(str(user_id), {})
     realtime_listen = cfg.get("realtime_listen", False)
@@ -2396,53 +1839,9 @@ async def debug_command(client, message):
     
     await message.reply(debug_text)
 
-# 登录测试命令
-@app.on_message(filters.command("testlogin") & filters.private)
-async def test_login_status(message):
-    """测试登录状态"""
-    user_id = message.from_user.id
-    
-    # 检查登录状态
-    if is_user_logged_in(user_id):
-        username = get_logged_in_username(user_id)
-        is_admin = is_admin_user(user_id)
-        admin_text = " (管理员)" if is_admin else ""
-        
-        await message.reply_text(
-            f"✅ **登录状态检查**\n\n"
-            f"用户ID: {user_id}\n"
-            f"用户名: {username}{admin_text}\n"
-            f"状态: 已登录\n\n"
-            f"所有功能可用！"
-        )
-    else:
-        await message.reply_text(
-            f"❌ **登录状态检查**\n\n"
-            f"用户ID: {user_id}\n"
-            f"状态: 未登录\n\n"
-            f"请使用 /start 命令登录"
-        )
+# 登录测试命令已移除
 
-# 登录数据检查命令
-@app.on_message(filters.command("checklogin") & filters.private)
-async def check_login_data(message):
-    """检查登录数据"""
-    user_id = message.from_user.id
-    
-    if not is_admin_user(user_id):
-        await message.reply_text("❌ 只有管理员可以使用此命令")
-        return
-    
-    # 显示登录数据统计
-    total_users = len(logged_in_users)
-    total_attempts = len(login_attempts)
-    
-    await message.reply_text(
-        f"📊 **登录数据统计**\n\n"
-        f"已登录用户: {total_users}\n"
-        f"登录尝试记录: {total_attempts}\n\n"
-        f"数据文件: {get_config_path(f'user_login_{bot_config['bot_id']}.json')}"
-    )
+# 登录数据检查命令已移除
 
 # ==================== 回调处理 ====================
 @app.on_callback_query()
@@ -2450,23 +1849,7 @@ async def callback_handler(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
     
-    # 特殊处理登录相关的回调
-    if data == "refresh_login_status":
-        if can_attempt_login(user_id):
-            await show_login_screen(callback_query.message)
-        # 锁定检查已禁用，继续处理
-    
-    # 其他回调需要登录验证
-    if not is_user_logged_in(user_id):
-        try:
-            await callback_query.answer("请先登录", show_alert=True)
-        except Exception as e:
-            logging.warning(f"回调查询应答失败: {e}")
-        await show_login_screen(callback_query.message)
-        return
-    
-    # 更新用户活动时间
-    update_user_activity(user_id)
+    # 登录系统已移除，所有用户可直接使用
     logging.info(f"用户 {user_id} 点击了回调按钮: {data}")
     
     # 安全地处理回调查询，避免 QUERY_ID_INVALID 错误
@@ -2823,9 +2206,7 @@ async def callback_handler(client, callback_query):
 @app.on_message(filters.command("optimize") & filters.private)
 async def optimize_transport_command(client, message):
     user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
+    # 登录检查已移除
     
     # 获取用户配置
     cfg = user_configs.get(str(user_id), {})
@@ -2900,9 +2281,7 @@ async def optimize_transport_command(client, message):
 @app.on_message(filters.command("limits") & filters.private)
 async def explain_limits_command(client, message):
     user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
+    # 登录检查已移除
     
     explain_text = f"🎉 **限制状态说明**\n\n"
     explain_text += f"✅ **已移除所有用户级限制！**\n\n"
@@ -2932,9 +2311,7 @@ async def explain_limits_command(client, message):
 @app.on_message(filters.command("floodwait") & filters.private)
 async def floodwait_status_command(client, message):
     user_id = message.from_user.id
-    if not is_user_logged_in(user_id):
-        await message.reply("请先登录后再使用此命令。")
-        return
+    # 登录检查已移除
     
     # 执行自动恢复检查
     recovered, expired = flood_wait_manager.auto_recovery_check()
@@ -3032,18 +2409,7 @@ async def floodwait_status_command(client, message):
 async def handle_text_input(client, message):
     user_id = message.from_user.id
     
-    # 检查是否正在等待用户名输入
-    if user_id in pending_logins and pending_logins[user_id].get("waiting_for_username"):
-        await handle_username_input(message)
-        return
-    
-    # 检查登录状态
-    if not is_user_logged_in(user_id):
-        await show_login_screen(message)
-        return
-    
-    # 更新用户活动时间
-    update_user_activity(user_id)
+    # 登录检查已移除
     last_task = find_task(user_id, state="waiting_for_source") or \
                 find_task(user_id, state="waiting_for_target") or \
                 find_task(user_id, state="waiting_for_edit_input") or \
@@ -6566,7 +5932,7 @@ def validate_user_config(config):
 
 # ==================== 端口绑定和心跳机制 ====================
 def start_port_server():
-    """启动端口服务器，用于Render Web Service"""
+    """启动端口服务器，为每个机器人分配不同端口"""
     try:
         import socket
         import http.server
@@ -6599,20 +5965,45 @@ def start_port_server():
                 # 禁用HTTP访问日志
                 pass
         
-        # 绑定到Render分配的端口
-        port = int(os.environ.get('PORT', 8080))
+        # 根据机器人ID分配不同端口
+        bot_id = bot_config['bot_id']
+        base_port = 8080
         
-        with socketserver.TCPServer(("", port), SimpleHandler) as httpd:
-            print(f"🌐 [{bot_config['bot_id']}] 端口服务器启动成功，监听端口 {port}")
-            httpd.serve_forever()
+        # 为不同机器人分配端口
+        port_mapping = {
+            'wang': 8080,      # 机器人1
+            'bot_2': 8081,     # 机器人2
+            'bot_3': 8082      # 机器人3
+        }
+        
+        # 获取分配的端口
+        port = port_mapping.get(bot_id, base_port)
+        
+        # 尝试绑定端口，如果失败则使用环境变量
+        try:
+            with socketserver.TCPServer(("", port), SimpleHandler) as httpd:
+                print(f"🌐 [{bot_id}] 端口服务器启动成功，监听端口 {port}")
+                httpd.serve_forever()
+        except OSError as e:
+            if "Address already in use" in str(e):
+                # 端口被占用，使用环境变量端口
+                env_port = int(os.environ.get('PORT', port + 100))
+                with socketserver.TCPServer(("", env_port), SimpleHandler) as httpd:
+                    print(f"🌐 [{bot_id}] 端口服务器启动成功，使用备用端口 {env_port}")
+                    httpd.serve_forever()
+            else:
+                raise e
     
     except Exception as e:
         print(f"⚠️ [{bot_config['bot_id']}] 端口服务器启动失败: {e}")
+        # 端口服务器失败不影响机器人运行
 
 def start_heartbeat():
     """启动心跳机制，防止Render 15分钟自动停止"""
     import requests
     import time
+    
+    bot_id = bot_config['bot_id']
     
     while True:
         try:
@@ -6621,11 +6012,11 @@ def start_heartbeat():
             if service_url:
                 # 向自己的服务发送请求，保持活跃
                 response = requests.get(f"{service_url}/", timeout=10)
-                print(f"💓 [{bot_config['bot_id']}] 心跳请求成功: {response.status_code}")
+                print(f"💓 [{bot_id}] 心跳请求成功: {response.status_code}")
             else:
-                print(f"💓 [{bot_config['bot_id']}] 心跳机制运行中（无外部URL）")
+                print(f"💓 [{bot_id}] 心跳机制运行中（无外部URL）")
         except Exception as e:
-            print(f"💓 [{bot_config['bot_id']}] 心跳请求失败: {e}")
+            print(f"💓 [{bot_id}] 心跳请求失败: {e}")
         
         # 每10分钟发送一次心跳
         time.sleep(600)
@@ -6650,7 +6041,7 @@ if __name__ == "__main__":
     load_configs()
     load_history()
     load_running_tasks()
-    load_login_data()
+# 登录数据加载已移除
     load_user_states()
     
     # 验证用户配置
@@ -6686,8 +6077,8 @@ if __name__ == "__main__":
     print(f"   🔑 机器人ID: {bot_config['bot_id']}")
     print(f"   📡 新搬运引擎: {'✅ 可用' if NEW_ENGINE_AVAILABLE else '❌ 不可用'}")
     print(f"   🌐 Render部署: {'✅ 启用' if RENDER_DEPLOYMENT else '❌ 禁用'}")
-    print(f"   🔐 登录验证: {'✅ 启用' if ENABLE_USERNAME_LOGIN else '❌ 禁用'}")
-    print(f"   👑 管理员: {len(ADMIN_USERNAMES)} 人")
+    print(f"   🔐 登录验证: ❌ 已移除")
+    print(f"   👑 管理员: 0 人")
     print(f"   ⚡ 性能监控: ✅ 启用")
     print(f"   🛡️ FloodWait保护: ✅ 已修复异常限制")
     print(f"   🔄 自动恢复: ✅ 每5分钟检查一次")
