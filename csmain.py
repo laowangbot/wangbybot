@@ -3528,6 +3528,7 @@ async def floodwait_status_command(client, message):
 @app.on_message(filters.private & filters.text)
 @monitor_performance('handle_text_input')
 async def handle_text_input(client, message):
+    global processed_messages
     user_id = message.from_user.id
     
     # 防止重复处理 - 使用更强大的去重机制
