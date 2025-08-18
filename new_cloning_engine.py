@@ -252,13 +252,13 @@ class RobustCloningEngine:
         
         # 根据性能模式设置参数 - 优化版本
         if performance_mode == "conservative":
-            self.batch_size_range = (100, 200)  # 减少批次大小，降低内存占用
-            self.batch_delay_range = (1.0, 2.0)  # 减少延迟范围
-            self.media_group_delay = 1.0
-            self.message_delay_media = 0.6
-            self.message_delay_text = 0.4
-            self.save_frequency = 30  # 更频繁保存，减少内存占用
-            self.log_frequency = 8
+            self.batch_size_range = (50, 100)   # 进一步减少批次大小（从100-200减少到50-100）
+            self.batch_delay_range = (2.0, 4.0) # 增加延迟范围（从1.0-2.0增加到2.0-4.0）
+            self.media_group_delay = 3.0         # 增加媒体组延迟（从1.0增加到3.0）
+            self.message_delay_media = 1.5       # 增加媒体消息延迟（从0.6增加到1.5）
+            self.message_delay_text = 1.0        # 增加文本消息延迟（从0.4增加到1.0）
+            self.save_frequency = 20             # 更频繁保存（从30减少到20）
+            self.log_frequency = 5               # 更频繁日志（从8减少到5）
         elif performance_mode == "balanced":
             self.batch_size_range = (200, 400)  # 平衡性能和内存
             self.batch_delay_range = (0.3, 1.0)

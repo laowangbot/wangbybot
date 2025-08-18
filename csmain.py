@@ -137,13 +137,13 @@ class FloodWaitManager:
     def __init__(self):
         self.flood_wait_times = {}  # 记录每个操作的等待时间
         self.last_operation_time = {}  # 记录每个操作的最后执行时间
-        self.operation_delays = {  # 不同操作的延迟配置（已最小化）
-            'edit_message': 0.5,    # 编辑消息间隔0.5秒
-            'send_message': 0.3,    # 发送消息间隔0.3秒
-            'forward_message': 0.5, # 转发消息间隔0.5秒
-            'delete_message': 0.3,  # 删除消息间隔0.3秒
-            'copy_message': 0.3,    # 复制消息间隔0.3秒
-            'send_media_group': 0.5, # 发送媒体组间隔0.5秒
+        self.operation_delays = {  # 优化后的延迟配置（更保守）
+            'edit_message': 2.0,    # 编辑消息间隔2秒（从0.5秒增加）
+            'send_message': 1.5,    # 发送消息间隔1.5秒（从0.3秒增加）
+            'forward_message': 2.0, # 转发消息间隔2秒（从0.5秒增加）
+            'delete_message': 1.0,  # 删除消息间隔1秒（从0.3秒增加）
+            'copy_message': 1.5,    # 复制消息间隔1.5秒（从0.3秒增加）
+            'send_media_group': 3.0, # 发送媒体组间隔3秒（从0.5秒增加）
         }
         
         # 启动时清理所有可能的遗留用户级限制数据
@@ -396,6 +396,49 @@ class FloodWaitManager:
             'last_check': current_time
         }
     
+    def get_adaptive_wait_time(self, original_wait_time):
+        """智能自适应等待时间计算"""
+        if original_wait_time <= 60:
+            return original_wait_time  # 60秒以内直接等待
+        elif original_wait_time <= 300:  # 5分钟以内
+            return min(120, original_wait_time)  # 最多等待2分钟
+        elif original_wait_time <= 1800:  # 30分钟以内
+            return min(300, original_wait_time)  # 最多等待5分钟
+        else:
+            return 600  # 超过30分钟的异常限制，最多等待10分钟
+    
+    def is_emergency_mode(self):
+        """检测是否处于紧急状态"""
+        current_time = time.time()
+        # 检查是否有超过5分钟的等待时间
+        for operation, wait_time in self.flood_wait_times.items():
+            if wait_time > current_time + 300:  # 超过5分钟
+                return True
+        return False
+    
+    def enter_emergency_mode(self):
+        """进入紧急恢复模式"""
+        logging.warning("🚨 FloodWaitManager进入紧急恢复模式")
+        current_time = time.time()
+        
+        # 清理所有异常的长时间限制
+        for operation in list(self.flood_wait_times.keys()):
+            if self.flood_wait_times[operation] > current_time + 300:
+                old_time = self.flood_wait_times[operation]
+                self.flood_wait_times[operation] = current_time + 60  # 重置为60秒
+                logging.warning(f"🔧 重置异常限制 {operation}: {old_time-current_time:.0f}秒 -> 60秒")
+        
+        # 设置极保守的延迟
+        self.operation_delays = {
+            'edit_message': 5.0,
+            'send_message': 3.0,
+            'forward_message': 5.0,
+            'delete_message': 2.0,
+            'copy_message': 3.0,
+            'send_media_group': 8.0,
+        }
+        logging.info("✅ 紧急模式配置完成，延迟已设置为极保守模式")
+
     def get_optimal_batch_size(self, operation_type):
         """获取最优批量操作大小"""
         # 根据操作类型返回安全的批量大小
@@ -608,7 +651,7 @@ MIN_INTERVAL = 2  # 最小发送间隔（秒）
 FLOOD_WAIT_THRESHOLD = 30  # 流量限制阈值（秒）
 
 # 性能模式配置
-PERFORMANCE_MODE = "aggressive"  # 可选: "conservative", "balanced", "aggressive"
+PERFORMANCE_MODE = "conservative"  # 可选: "conservative", "balanced", "aggressive"
 # conservative: 保守模式，适合稳定性和避免API限制
 # balanced: 平衡模式，性能和稳定性的折中
 # aggressive: 激进模式，最大化性能，可能触发API限制
