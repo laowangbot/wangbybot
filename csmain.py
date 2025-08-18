@@ -2155,6 +2155,12 @@ async def callback_handler(client, callback_query):
     elif data.startswith("pair_filter_replacements:"):
         pair_id = int(data.split(':')[1])
         await show_pair_replacements_menu(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_add_replacement:"):
+        pair_id = int(data.split(':')[1])
+        await request_pair_add_replacement(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_clear_replacements:"):
+        pair_id = int(data.split(':')[1])
+        await clear_pair_replacements(callback_query.message, user_id, pair_id)
     elif data.startswith("pair_filter_files:"):
         pair_id = int(data.split(':')[1])
         await show_pair_files_menu(callback_query.message, user_id, pair_id)
@@ -2620,7 +2626,8 @@ async def handle_text_input(client, message):
                 find_task(user_id, state="waiting_for_button_probability") or \
                             find_task(user_id, state="waiting_pair_tail_text") or \
             find_task(user_id, state="waiting_pair_buttons") or \
-            find_task(user_id, state="waiting_pair_add_keyword")
+            find_task(user_id, state="waiting_pair_add_keyword") or \
+            find_task(user_id, state="waiting_for_pair_replacement")
 
     if not last_task:
         # 避免重复发送相同内容
@@ -2670,6 +2677,9 @@ async def handle_text_input(client, message):
     elif current_state == "waiting_pair_add_keyword":
         logging.info(f"handle_text_input: 处理 waiting_pair_add_keyword 状态，用户 {user_id}")
         await set_pair_add_keyword(message, user_id, message.text)
+    elif current_state == "waiting_for_pair_replacement":
+        logging.info(f"handle_text_input: 处理 waiting_for_pair_replacement 状态，用户 {user_id}")
+        await set_pair_replacement(message, user_id, message.text)
     else:
         # 避免重复发送相同内容
         try:
@@ -6415,6 +6425,160 @@ def start_heartbeat():
         
         # 每10分钟发送一次心跳
         time.sleep(600)
+
+# ==================== 频道组敏感词替换管理 ====================
+async def request_pair_add_replacement(message, user_id, pair_id):
+    """请求用户输入频道组敏感词替换规则"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。", 
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="show_channel_config_menu")]]))
+        return
+    
+    pair = channel_pairs[pair_id]
+    source = pair.get("source", "未知")
+    target = pair.get("target", "未知")
+    
+    # 设置用户状态为等待输入替换规则
+    user_states.setdefault(user_id, []).append({
+        "state": "waiting_for_pair_replacement",
+        "pair_id": pair_id,
+        "message_id": message.id
+    })
+    
+    text = f"🔀 **添加敏感词替换规则**\n\n"
+    text += f"📂 **频道组**: `{source}` ➜ `{target}`\n\n"
+    text += f"💡 **格式**: 原词=新词\n"
+    text += f"📝 **示例**: 敏感词=替换词\n\n"
+    text += f"请发送替换规则，格式为：原词=新词"
+    
+    buttons = [[InlineKeyboardButton("🔙 返回", callback_data=f"pair_filter_replacements:{pair_id}")]]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+async def clear_pair_replacements(message, user_id, pair_id):
+    """清空频道组敏感词替换规则"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。", 
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="show_channel_config_menu")]]))
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters or not custom_filters.get("replacement_words"):
+        await safe_edit_or_reply(message, "ℹ️ 该频道组没有设置敏感词替换规则。", 
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回", callback_data=f"pair_filter_replacements:{pair_id}")
+            ]]))
+        return
+    
+    # 清空替换规则
+    custom_filters["replacement_words"] = {}
+    save_configs()
+    
+    source = pair.get("source", "未知")
+    target = pair.get("target", "未知")
+    
+    text = f"✅ **敏感词替换规则已清空**\n\n"
+    text += f"📂 **频道组**: `{source}` ➜ `{target}`\n\n"
+    text += f"🗑️ 所有替换规则已被移除。"
+    
+    buttons = [[InlineKeyboardButton("🔙 返回", callback_data=f"pair_filter_replacements:{pair_id}")]]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+async def set_pair_replacement(message, user_id, text):
+    """设置频道组敏感词替换规则"""
+    # 查找用户的等待状态
+    user_tasks = user_states.get(user_id, [])
+    replacement_task = None
+    
+    for task in user_tasks:
+        if task.get("state") == "waiting_for_pair_replacement":
+            replacement_task = task
+            break
+    
+    if not replacement_task:
+        await message.reply_text("❌ 操作已过期，请重新选择。", reply_markup=get_main_menu_buttons(user_id))
+        return
+    
+    pair_id = replacement_task.get("pair_id")
+    
+    # 验证输入格式
+    if "=" not in text:
+        await message.reply_text(
+            "❌ **格式错误**\n\n"
+            "💡 **正确格式**: 原词=新词\n"
+            "📝 **示例**: 敏感词=替换词\n\n"
+            "请重新输入：",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回", callback_data=f"pair_filter_replacements:{pair_id}")
+            ]])
+        )
+        return
+    
+    old_word, new_word = text.split("=", 1)
+    old_word = old_word.strip()
+    new_word = new_word.strip()
+    
+    if not old_word or not new_word:
+        await message.reply_text(
+            "❌ **输入无效**\n\n"
+            "原词和新词都不能为空。\n"
+            "请重新输入：",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回", callback_data=f"pair_filter_replacements:{pair_id}")
+            ]])
+        )
+        return
+    
+    # 获取用户配置
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await message.reply_text("❌ 频道组不存在。", reply_markup=get_main_menu_buttons(user_id))
+        return
+    
+    pair = channel_pairs[pair_id]
+    
+    # 确保custom_filters存在
+    if "custom_filters" not in pair:
+        pair["custom_filters"] = {}
+    
+    if "replacement_words" not in pair["custom_filters"]:
+        pair["custom_filters"]["replacement_words"] = {}
+    
+    # 添加替换规则
+    pair["custom_filters"]["replacement_words"][old_word] = new_word
+    
+    # 保存配置
+    save_configs()
+    
+    # 移除等待状态
+    user_tasks.remove(replacement_task)
+    
+    source = pair.get("source", "未知")
+    target = pair.get("target", "未知")
+    
+    text = f"✅ **敏感词替换规则已添加**\n\n"
+    text += f"📂 **频道组**: `{source}` ➜ `{target}`\n\n"
+    text += f"🔄 **替换规则**: `{old_word}` → `{new_word}`\n\n"
+    text += f"💡 消息中的 `{old_word}` 将被自动替换为 `{new_word}`"
+    
+    buttons = [
+        [InlineKeyboardButton("➕ 继续添加", callback_data=f"pair_add_replacement:{pair_id}")],
+        [InlineKeyboardButton("🔙 返回设置", callback_data=f"pair_filter_replacements:{pair_id}")]
+    ]
+    
+    await message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 # ==================== 启动机器人 ====================
 if __name__ == "__main__":
