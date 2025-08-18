@@ -241,11 +241,14 @@ class MessageDeduplicator:
 class RobustCloningEngine:
     """鲁棒的搬运引擎"""
     
-    def __init__(self, client: Client, performance_mode="aggressive"):
+    def __init__(self, client: Client, performance_mode="aggressive", flood_wait_manager=None):
         self.client = client
         self.deduplicator = MessageDeduplicator()
         self.processed_message_ids: Dict[str, Set[int]] = {}  # 记录已处理的消息ID
         self.performance_mode = performance_mode
+        
+        # 🔧 新增：统一的FloodWait管理器
+        self.flood_wait_manager = flood_wait_manager
         
         # 根据性能模式设置参数 - 优化版本
         if performance_mode == "conservative":
@@ -857,8 +860,12 @@ class RobustCloningEngine:
         stats: dict, 
         task_key: str
     ) -> bool:
-        """处理媒体组"""
+        """处理媒体组，集成统一FloodWait管理"""
         try:
+            # 🔧 新增：发送前检查全局FloodWait限制
+            if self.flood_wait_manager:
+                await self.flood_wait_manager.wait_if_needed('send_media_group')
+            
             if not group_messages:
                 return False
             
@@ -978,48 +985,92 @@ class RobustCloningEngine:
                 stats["total_processed"] += len(group_messages)
                 return False
             
-            # 特殊处理 FLOOD_WAIT 错误
+            # 🔧 优化：统一的FloodWait处理
             if "FLOOD_WAIT" in str(e):
                 import re
                 wait_match = re.search(r'wait of (\d+) seconds', str(e))
                 if wait_match:
                     wait_time = int(wait_match.group(1))
-                    if wait_time <= 60:
-                        logging.warning(f"⏳ 媒体组遇到FloodWait，需要等待 {wait_time} 秒")
+                    
+                    # 🔧 新增：使用统一的FloodWait管理器
+                    if self.flood_wait_manager:
+                        # 设置FloodWait限制
+                        self.flood_wait_manager.set_flood_wait('send_media_group', wait_time)
                         
-                        # 智能等待策略：等待 Telegram 要求的时间
-                        try:
-                            logging.info(f"⏳ 等待 {wait_time} 秒后重试...")
-                            await asyncio.sleep(wait_time)
+                        # 检查是否应该重试
+                        if wait_time <= 60:
+                            logging.warning(f"⏳ 媒体组遇到FloodWait，通过统一管理器等待 {wait_time} 秒")
+                            
+                            # 使用统一管理器的等待机制
+                            await self.flood_wait_manager.wait_if_needed('send_media_group')
                             
                             # 重试一次
-                            results = await self.client.send_media_group(
-                                chat_id=target_chat_id,
-                                media=media_list
-                            )
-                            
-                            # 如果有按钮需要添加，直接发送按钮（不添加额外文本）
-                            if reply_markup and results:
-                                try:
-                                    await self.client.send_message(
-                                        chat_id=target_chat_id,
-                                        text="",  # 空文本，只显示按钮
-                                        reply_markup=reply_markup
-                                    )
-                                except Exception as button_error:
-                                    logging.warning(f"发送媒体组按钮失败(重试): {button_error}")
-                            
-                            if results:
-                                for message in group_messages:
-                                    self._mark_message_processed(task_key, message.id)
-                                stats["successfully_cloned"] += len(group_messages)
-                                stats["total_processed"] += len(group_messages)
-                                logging.info(f"✅ 媒体组重试成功: {len(group_messages)} 条消息")
-                                return True
-                        except Exception as retry_e:
-                            logging.error(f"❌ 媒体组重试失败: {retry_e}")
+                            try:
+                                results = await self.client.send_media_group(
+                                    chat_id=target_chat_id,
+                                    media=media_list
+                                )
+                                
+                                # 如果有按钮需要添加，直接发送按钮（不添加额外文本）
+                                if reply_markup and results:
+                                    try:
+                                        await self.client.send_message(
+                                            chat_id=target_chat_id,
+                                            text="",  # 空文本，只显示按钮
+                                            reply_markup=reply_markup
+                                        )
+                                    except Exception as button_error:
+                                        logging.warning(f"发送媒体组按钮失败(统一管理器重试): {button_error}")
+                                
+                                if results:
+                                    for message in group_messages:
+                                        self._mark_message_processed(task_key, message.id)
+                                    stats["successfully_cloned"] += len(group_messages)
+                                    stats["total_processed"] += len(group_messages)
+                                    logging.info(f"✅ 媒体组通过统一管理器重试成功: {len(group_messages)} 条消息")
+                                    return True
+                            except Exception as retry_e:
+                                logging.error(f"❌ 媒体组统一管理器重试失败: {retry_e}")
+                        else:
+                            logging.warning(f"⚠️ FloodWait时间过长({wait_time}秒)，跳过媒体组")
                     else:
-                        logging.error(f"❌ 媒体组流量限制时间过长 ({wait_time}秒)，跳过")
+                        # 兼容模式：如果没有FloodWaitManager，使用原有逻辑
+                        if wait_time <= 60:
+                            logging.warning(f"⏳ 媒体组遇到FloodWait，需要等待 {wait_time} 秒（兼容模式）")
+                            
+                            # 智能等待策略：等待 Telegram 要求的时间
+                            try:
+                                logging.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                                await asyncio.sleep(wait_time)
+                                
+                                # 重试一次
+                                results = await self.client.send_media_group(
+                                    chat_id=target_chat_id,
+                                    media=media_list
+                                )
+                                
+                                # 如果有按钮需要添加，直接发送按钮（不添加额外文本）
+                                if reply_markup and results:
+                                    try:
+                                        await self.client.send_message(
+                                            chat_id=target_chat_id,
+                                            text="",  # 空文本，只显示按钮
+                                            reply_markup=reply_markup
+                                        )
+                                    except Exception as button_error:
+                                        logging.warning(f"发送媒体组按钮失败(重试): {button_error}")
+                                
+                                if results:
+                                    for message in group_messages:
+                                        self._mark_message_processed(task_key, message.id)
+                                    stats["successfully_cloned"] += len(group_messages)
+                                    stats["total_processed"] += len(group_messages)
+                                    logging.info(f"✅ 媒体组重试成功: {len(group_messages)} 条消息")
+                                    return True
+                            except Exception as retry_e:
+                                logging.error(f"❌ 媒体组重试失败: {retry_e}")
+                        else:
+                            logging.error(f"❌ 媒体组流量限制时间过长 ({wait_time}秒)，跳过")
                 else:
                     logging.error(f"❌ 媒体组FLOOD_WAIT格式解析失败: {e}")
             else:
@@ -1036,12 +1087,16 @@ class RobustCloningEngine:
         processed_text: str, 
         reply_markup: Optional[InlineKeyboardMarkup]
     ) -> bool:
-        """安全发送消息"""
+        """安全发送消息，集成统一的FloodWait管理"""
         try:
             # 检查是否为服务消息（无法复制）
             if hasattr(original_message, 'service') and original_message.service:
                 logging.warning(f"⚠️ 跳过服务消息 {original_message.id}（无法复制）")
                 return False
+            
+            # 🔧 新增：发送前检查全局FloodWait限制
+            if self.flood_wait_manager:
+                await self.flood_wait_manager.wait_if_needed('send_message')
             
             # 判断消息类型
             is_text_only = (original_message.text and not (
@@ -1087,48 +1142,91 @@ class RobustCloningEngine:
                 self._permission_errors.add(target_chat_id)
                 return False
             
-            # 特殊处理 FLOOD_WAIT 错误
+            # 🔧 优化：统一的FloodWait处理
             if "FLOOD_WAIT" in str(e):
                 import re
                 # 提取等待时间
                 wait_match = re.search(r'wait of (\d+) seconds', str(e))
                 if wait_match:
                     wait_time = int(wait_match.group(1))
-                    if wait_time <= 60:  # 如果等待时间不超过60秒，就等待
-                        logging.warning(f"⏳ 消息 {original_message.id} 遇到FloodWait，需要等待 {wait_time} 秒")
+                    
+                    # 🔧 新增：使用统一的FloodWait管理器
+                    if self.flood_wait_manager:
+                        # 设置FloodWait限制
+                        self.flood_wait_manager.set_flood_wait('send_message', wait_time)
                         
-                        # 智能等待策略：等待 Telegram 要求的时间
-                        try:
-                            logging.info(f"⏳ 等待 {wait_time} 秒后重试...")
-                            await asyncio.sleep(wait_time)
+                        # 检查是否应该重试
+                        if wait_time <= 60:  # 与主代码保持一致的60秒限制
+                            logging.warning(f"⏳ 消息 {original_message.id} 遇到FloodWait，通过统一管理器等待 {wait_time} 秒")
+                            
+                            # 使用统一管理器的等待机制
+                            await self.flood_wait_manager.wait_if_needed('send_message')
                             
                             # 重试一次
-                            if original_message.text and not (
-                                original_message.photo or original_message.video or 
-                                original_message.document or original_message.animation or 
-                                original_message.audio or original_message.voice or original_message.sticker
-                            ):
-                                result = await self.client.send_message(
-                                    chat_id=target_chat_id,
-                                    text=processed_text or "（空消息）",
-                                    reply_markup=reply_markup
-                                )
-                            else:
-                                result = await self.client.copy_message(
-                                    chat_id=target_chat_id,
-                                    from_chat_id=original_message.chat.id,
-                                    message_id=original_message.id,
-                                    caption=processed_text,
-                                    reply_markup=reply_markup
-                                )
-                            
-                            if result and hasattr(result, 'id'):
-                                logging.info(f"✅ 消息 {original_message.id} 重试成功")
-                                return True
-                        except Exception as retry_e:
-                            logging.error(f"❌ 消息 {original_message.id} 重试失败: {retry_e}")
+                            try:
+                                if original_message.text and not (
+                                    original_message.photo or original_message.video or 
+                                    original_message.document or original_message.animation or 
+                                    original_message.audio or original_message.voice or original_message.sticker
+                                ):
+                                    result = await self.client.send_message(
+                                        chat_id=target_chat_id,
+                                        text=processed_text or "（空消息）",
+                                        reply_markup=reply_markup
+                                    )
+                                else:
+                                    result = await self.client.copy_message(
+                                        chat_id=target_chat_id,
+                                        from_chat_id=original_message.chat.id,
+                                        message_id=original_message.id,
+                                        caption=processed_text,
+                                        reply_markup=reply_markup
+                                    )
+                                
+                                if result and hasattr(result, 'id'):
+                                    logging.info(f"✅ 消息 {original_message.id} 通过统一管理器重试成功")
+                                    return True
+                            except Exception as retry_e:
+                                logging.error(f"❌ 消息 {original_message.id} 统一管理器重试失败: {retry_e}")
+                        else:
+                            logging.warning(f"⚠️ FloodWait时间过长({wait_time}秒)，跳过消息 {original_message.id}")
                     else:
-                        logging.error(f"❌ 消息 {original_message.id} 流量限制时间过长 ({wait_time}秒)，跳过")
+                        # 兼容模式：如果没有FloodWaitManager，使用原有逻辑
+                        if wait_time <= 60:
+                            logging.warning(f"⏳ 消息 {original_message.id} 遇到FloodWait，需要等待 {wait_time} 秒（兼容模式）")
+                            
+                            # 智能等待策略：等待 Telegram 要求的时间
+                            try:
+                                logging.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                                await asyncio.sleep(wait_time)
+                                
+                                # 重试一次
+                                if original_message.text and not (
+                                    original_message.photo or original_message.video or 
+                                    original_message.document or original_message.animation or 
+                                    original_message.audio or original_message.voice or original_message.sticker
+                                ):
+                                    result = await self.client.send_message(
+                                        chat_id=target_chat_id,
+                                        text=processed_text or "（空消息）",
+                                        reply_markup=reply_markup
+                                    )
+                                else:
+                                    result = await self.client.copy_message(
+                                        chat_id=target_chat_id,
+                                        from_chat_id=original_message.chat.id,
+                                        message_id=original_message.id,
+                                        caption=processed_text,
+                                        reply_markup=reply_markup
+                                    )
+                                
+                                if result and hasattr(result, 'id'):
+                                    logging.info(f"✅ 消息 {original_message.id} 重试成功")
+                                    return True
+                            except Exception as retry_e:
+                                logging.error(f"❌ 消息 {original_message.id} 重试失败: {retry_e}")
+                        else:
+                            logging.error(f"❌ 消息 {original_message.id} 流量限制时间过长 ({wait_time}秒)，跳过")
                 else:
                     logging.error(f"❌ 消息 {original_message.id} FLOOD_WAIT 格式解析失败: {e}")
             else:

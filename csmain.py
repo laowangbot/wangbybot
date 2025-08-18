@@ -5647,9 +5647,14 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
             ]]))
         return
     
-    # 初始化新引擎
+    # 初始化新搬运引擎
     if robust_cloning_engine is None:
-        robust_cloning_engine = RobustCloningEngine(client)
+        # 🔧 新增：传递FloodWaitManager给搬运引擎
+        robust_cloning_engine = RobustCloningEngine(
+            client=client,
+            flood_wait_manager=flood_wait_manager  # 传递统一管理器
+        )
+        logging.info("✅ 搬运引擎已初始化并集成统一FloodWait管理")
     
     # 保存原始任务，避免变量名冲突
     original_task = task
