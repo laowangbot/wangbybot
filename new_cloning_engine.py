@@ -304,6 +304,10 @@ class RobustCloningEngine:
         
         # 支持强制频繁更新模式
         self.force_frequent_updates = False
+        
+        # 🔧 新增：按钮和小尾巴频率计数器
+        self.button_counter = 0
+        self.tail_counter = 0
     
     def _load_processed_ids(self, task_key: str):
         """加载已处理的消息ID列表"""
@@ -727,7 +731,8 @@ class RobustCloningEngine:
         # 基础文本处理
         if config.get("remove_links", False):
             import re
-            text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+            # 修复：使用正确的正则表达式
+            text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', text, flags=re.MULTILINE)
         
         # 添加尾巴文本（简化版本）
         tail_text = config.get("tail_text", "")
@@ -772,7 +777,8 @@ class RobustCloningEngine:
         
         # 移除链接
         if config.get("remove_links", False):
-            processed_text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', processed_text)
+            # 修复：使用正确的正则表达式
+            processed_text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', processed_text, flags=re.MULTILINE)
         
         # 移除用户名
         if config.get("remove_usernames", False):
@@ -832,8 +838,14 @@ class RobustCloningEngine:
         elif mode == "always":
             return True
         elif mode == "interval":
-            # 简化处理，总是添加
-            return True
+            # 🔧 修复：实现正确的间隔逻辑
+            interval = tail_frequency.get("interval", 5)
+            self.tail_counter += 1
+            
+            if self.tail_counter >= interval:
+                self.tail_counter = 0  # 重置计数器
+                return True
+            return False
         elif mode == "probability":
             import random
             probability = tail_frequency.get("probability", 50)
@@ -851,8 +863,14 @@ class RobustCloningEngine:
         elif mode == "always":
             return True
         elif mode == "interval":
-            # 简化处理，总是添加
-            return True
+            # 🔧 修复：实现正确的间隔逻辑
+            interval = button_frequency.get("interval", 5)
+            self.button_counter += 1
+            
+            if self.button_counter >= interval:
+                self.button_counter = 0  # 重置计数器
+                return True
+            return False
         elif mode == "probability":
             import random
             probability = button_frequency.get("probability", 50)

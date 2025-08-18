@@ -761,6 +761,21 @@ running_task_cancellation = {}  # 任务ID -> 取消标志
 # 系统维护按钮已移除
 
 # ==================== 通用辅助 ====================
+def _is_media_group_complete(messages):
+    """检查媒体组是否完整（基于消息ID连续性）"""
+    if len(messages) < 2:
+        return False
+    
+    # 按ID排序
+    sorted_messages = sorted(messages, key=lambda m: m.id)
+    
+    # 检查ID是否连续
+    for i in range(1, len(sorted_messages)):
+        if sorted_messages[i].id - sorted_messages[i-1].id > 1:
+            return False  # ID不连续，可能还有更多消息
+    
+    return True  # ID连续，认为组完整
+
 def parse_channel_identifier(raw: str):
     s = (raw or "").strip()
     # 纯数字或以 -100 开头
@@ -2708,8 +2723,15 @@ async def listen_and_clone(client, message):
         if message.media_group_id:
             key = (message.chat.id, message.media_group_id)
             listen_media_groups.setdefault(key, []).append(message)
-            # 简化：当达到 10 条或 1 秒后发送（此处仅按数量触发；生产应使用定时器）
-            if len(listen_media_groups[key]) < 2:
+            
+            # 改进的触发条件
+            messages = listen_media_groups[key]
+            should_process = (
+                len(messages) >= 3 or  # 有3个或更多消息
+                (len(messages) >= 2 and _is_media_group_complete(messages))  # 或2个消息但ID连续
+            )
+            
+            if not should_process:
                 return
             group_messages = sorted(listen_media_groups.pop(key), key=lambda m: m.id)
             # 过滤整组
@@ -5967,7 +5989,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         
         # 启动所有子任务并发执行 - 性能优化：限制最大并发数
         # 创建真正的Task对象，而不是协程
-        max_concurrent_tasks = 20  # 超激进配置：单任务内20个频道对同时并发（从10提升）
+        max_concurrent_tasks = 5  # 保守配置：单任务内5个频道对同时并发（从20降低）
         
         if len(clone_tasks) > max_concurrent_tasks:
             logging.warning(f"⚠️ 任务数量({len(clone_tasks)})超过最大并发数({max_concurrent_tasks})，将分批执行")
@@ -6009,6 +6031,10 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     # 额外检查：如果进度长时间没有变化，强制刷新
                     current_time = time.time()
                     for i, progress in task_progress.items():
+                        # 跳过已完成或错误状态的任务
+                        if progress.get("status") in ["完成", "错误"]:
+                            continue
+                            
                         last_update = progress.get("last_update_time", 0)
                         if current_time - last_update > 10:  # 10秒没有更新
                             logging.warning(f"任务 {i+1} 进度长时间未更新，强制刷新")

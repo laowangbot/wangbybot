@@ -22,10 +22,113 @@ class OptimizedListener:
         self.connection_pool = get_connection_pool()
         self.memory_manager = get_memory_manager()
         
-        # 媒体组缓存（使用智能缓存管理器）
+        # 媒体组缓存和定时器管理
         self.media_group_cache = {}
+        self.media_group_timers = {}  # 存储每个媒体组的定时器
+        self.media_group_locks = {}   # 防止并发处理
         
         logging.info("优化监听器初始化完成")
+    
+    async def _handle_media_group(self, client: Client, message: Message, pair: Dict, cfg: Dict, uid: str):
+        """处理媒体组消息 - 优化版本"""
+        key = (message.chat.id, message.media_group_id)
+        
+        # 获取或创建锁
+        if key not in self.media_group_locks:
+            self.media_group_locks[key] = asyncio.Lock()
+        
+        async with self.media_group_locks[key]:
+            # 初始化缓存
+            if key not in self.media_group_cache:
+                self.media_group_cache[key] = []
+            
+            # 添加消息到缓存
+            self.media_group_cache[key].append(message)
+            
+            # 只有第一个消息设置定时器
+            if len(self.media_group_cache[key]) == 1:
+                # 取消之前的定时器（如果存在）
+                if key in self.media_group_timers:
+                    self.media_group_timers[key].cancel()
+                
+                # 创建新的定时器
+                timer = asyncio.create_task(self._process_media_group_after_delay(client, key, pair, cfg, uid))
+                self.media_group_timers[key] = timer
+            
+            # 智能检测：如果消息ID不连续，可能媒体组已完整
+            elif self._is_media_group_complete(self.media_group_cache[key]):
+                # 取消定时器，立即处理
+                if key in self.media_group_timers:
+                    self.media_group_timers[key].cancel()
+                    del self.media_group_timers[key]
+                
+                await self._process_complete_media_group(client, key, pair, cfg, uid)
+    
+    def _is_media_group_complete(self, messages: List[Message]) -> bool:
+        """检测媒体组是否完整（基于消息ID连续性）"""
+        if len(messages) < 2:
+            return False
+        
+        # 按ID排序
+        sorted_messages = sorted(messages, key=lambda m: m.id)
+        
+        # 检查ID是否连续
+        for i in range(1, len(sorted_messages)):
+            if sorted_messages[i].id - sorted_messages[i-1].id > 1:
+                # ID不连续，可能还有消息未到达
+                return False
+        
+        # 如果已有3个或更多消息且ID连续，认为可能完整
+        return len(messages) >= 3
+    
+    async def _process_media_group_after_delay(self, client: Client, key: tuple, pair: Dict, cfg: Dict, uid: str):
+        """延迟处理媒体组"""
+        try:
+            # 等待2.5秒收集更多消息
+            await asyncio.sleep(2.5)
+            
+            # 处理媒体组
+            await self._process_complete_media_group(client, key, pair, cfg, uid)
+            
+        except asyncio.CancelledError:
+            # 定时器被取消，说明媒体组已被其他方式处理
+            pass
+        except Exception as e:
+            logging.error(f"延迟处理媒体组失败: {e}")
+        finally:
+            # 清理定时器记录
+            if key in self.media_group_timers:
+                del self.media_group_timers[key]
+    
+    async def _process_complete_media_group(self, client: Client, key: tuple, pair: Dict, cfg: Dict, uid: str):
+        """处理完整的媒体组"""
+        if key not in self.media_group_cache:
+            return
+        
+        # 获取并清理缓存
+        group_messages = sorted(self.media_group_cache.pop(key), key=lambda m: m.id)
+        
+        # 清理锁
+        if key in self.media_group_locks:
+            del self.media_group_locks[key]
+        
+        # 过滤检查
+        if any(self._should_filter_message(m, cfg) for m in group_messages):
+            logging.info(f"媒体组 {key[1]} 被过滤，跳过")
+            return
+        
+        # 去重检查
+        if not await self._check_media_group_dedupe(group_messages[0], pair):
+            return
+        
+        # 构建媒体列表
+        media_list, caption, reply_markup = await self._build_media_group(group_messages, cfg)
+        
+        if media_list:
+            logging.info(f"✅ 处理完整媒体组: {len(group_messages)} 条消息 (ID: {key[1]})")
+            await self._send_media_group_with_retry(client, pair['target'], media_list, reply_markup, uid)
+        else:
+            logging.warning(f"⚠️ 媒体组无有效媒体: {len(group_messages)} 条消息 (ID: {key[1]})")
     
     async def process_message(self, client: Client, message: Message, user_configs: Dict, matched_pairs: List):
         """处理监听到的消息"""
@@ -65,35 +168,6 @@ class OptimizedListener:
                     
             except Exception as e:
                 logging.error(f"处理用户 {uid} 的频道组失败: {e}")
-    
-    async def _handle_media_group(self, client: Client, message: Message, pair: Dict, cfg: Dict, uid: str):
-        """处理媒体组消息"""
-        key = (message.chat.id, message.media_group_id)
-        
-        # 使用智能缓存管理器
-        if key not in self.media_group_cache:
-            self.media_group_cache[key] = []
-        
-        self.media_group_cache[key].append(message)
-        
-        # 当达到2条消息时处理
-        if len(self.media_group_cache[key]) >= 2:
-            group_messages = sorted(self.media_group_cache.pop(key), key=lambda m: m.id)
-            
-            # 过滤检查
-            if any(self._should_filter_message(m, cfg) for m in group_messages):
-                logging.info(f"媒体组 {message.media_group_id} 被过滤，跳过")
-                return
-            
-            # 去重检查
-            if not await self._check_media_group_dedupe(message, pair):
-                return
-            
-            # 构建媒体列表
-            media_list, caption, reply_markup = await self._build_media_group(group_messages, cfg)
-            
-            if media_list:
-                await self._send_media_group_with_retry(client, pair['target'], media_list, reply_markup, uid)
     
     async def _handle_single_message(self, client: Client, message: Message, pair: Dict, cfg: Dict, uid: str):
         """处理单条消息"""
