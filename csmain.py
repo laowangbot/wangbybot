@@ -647,12 +647,14 @@ print(f"🔑 机器人ID: {bot_config['bot_id']}")
 
 # 检查Firebase存储状态
 try:
-    from simple_firebase_storage import get_firebase_storage
+    from firebase_storage import get_firebase_storage
     firebase_storage = get_firebase_storage(bot_config['bot_id'])
     if firebase_storage.is_available():
         print(f"✅ Firebase存储已连接，项目ID: {firebase_storage.project_id}")
     else:
         print("⚠️ Firebase存储未连接，将使用本地存储")
+except ImportError:
+    print("ℹ️ Firebase模块未安装，将使用本地存储")
 except Exception as e:
     print(f"⚠️ Firebase存储检查失败: {e}，将使用本地存储")
 
@@ -854,11 +856,13 @@ def save_configs():
     
     # 2. 尝试保存到Firebase
     try:
-        from simple_firebase_storage import save_configs_to_firebase
+        from firebase_storage import save_configs_to_firebase
         if save_configs_to_firebase(bot_config['bot_id'], user_configs):
             logging.info(f"[{bot_config['bot_id']}] 用户配置已成功保存到Firebase")
         else:
             logging.warning(f"[{bot_config['bot_id']}] Firebase保存失败，仅使用本地存储")
+    except ImportError:
+        logging.info(f"[{bot_config['bot_id']}] Firebase模块未安装，仅使用本地存储")
     except Exception as e:
         logging.warning(f"[{bot_config['bot_id']}] Firebase保存异常: {e}，仅使用本地存储")
 
@@ -868,7 +872,7 @@ def load_configs():
     
     # 1. 优先尝试从Firebase加载
     try:
-        from simple_firebase_storage import load_configs_from_firebase
+        from firebase_storage import load_configs_from_firebase
         firebase_configs = load_configs_from_firebase(bot_config['bot_id'])
         if firebase_configs:
             user_configs = firebase_configs
