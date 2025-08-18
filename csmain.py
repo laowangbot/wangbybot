@@ -105,41 +105,149 @@ print("🔄 FloodWait自动恢复检查已启动，每5分钟检查一次")
 def start_media_group_cleanup():
     """启动媒体组超时清理，每30秒清理一次过期的媒体组缓存"""
     import time
-    while True:
-        try:
-            # 等待30秒
-            time.sleep(30)
-            
-            # 清理过期的媒体组缓存
-            current_time = time.time()
-            expired_keys = []
-            
-            for key, messages in listen_media_groups.items():
-                if messages:
-                    # 检查最早的消息是否超过30秒
-                    earliest_time = getattr(messages[0], 'date', None)
-                    if earliest_time:
-                        time_diff = current_time - earliest_time.timestamp()
-                        if time_diff > 30:  # 超过30秒的媒体组强制处理
-                            expired_keys.append(key)
-            
-            # 处理过期的媒体组
-            for key in expired_keys:
-                if key in listen_media_groups:
-                    expired_messages = listen_media_groups.pop(key)
-                    logging.info(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息")
-                    
-                    # 这里可以添加强制处理的逻辑，或者直接丢弃
-                    # 为了避免复杂化，暂时直接丢弃
-                    
-        except Exception as e:
-            logging.error(f"❌ 媒体组超时清理出错: {e}")
-            time.sleep(60)  # 出错后等待1分钟再试
+    import asyncio
+    
+    # 创建一个事件循环来处理异步调用
+    def run_async_cleanup():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        while True:
+            try:
+                # 等待30秒
+                time.sleep(30)
+                
+                # 清理过期的媒体组缓存
+                current_time = time.time()
+                expired_keys = []
+                
+                for key, messages in listen_media_groups.items():
+                    if messages:
+                        # 检查最早的消息是否超过30秒
+                        earliest_time = getattr(messages[0], 'date', None)
+                        if earliest_time:
+                            time_diff = current_time - earliest_time.timestamp()
+                            if time_diff > 30:  # 超过30秒的媒体组强制处理
+                                expired_keys.append(key)
+                
+                # 处理过期的媒体组
+                for key in expired_keys:
+                    if key in listen_media_groups:
+                        expired_messages = listen_media_groups.pop(key)
+                        logging.info(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息")
+                        
+                        # 强制处理过期的媒体组，避免被分割
+                        try:
+                            # 获取频道组信息
+                            chat_id, media_group_id = key
+                            
+                            # 查找匹配的频道组配置
+                            for uid, cfg in user_configs.items():
+                                if not cfg.get("realtime_listen"):
+                                    continue
+                                
+                                for pair in cfg.get("channel_pairs", []):
+                                    if not pair.get("enabled", True) or not pair.get("monitor_enabled", False):
+                                        continue
+                                    
+                                    source_channel = str(pair.get("source"))
+                                    if source_channel == str(chat_id) or source_channel.lstrip('@') == str(chat_id).lstrip('@'):
+                                        # 找到匹配的频道组，强制处理媒体组
+                                        logging.info(f"🧹 强制处理过期媒体组: {source_channel} -> {pair.get('target')}")
+                                        
+                                        # 获取有效配置
+                                        effective_config = get_effective_config_for_realtime(uid, source_channel, pair.get('target'))
+                                        
+                                        # 过滤检查
+                                        filtered_messages = [m for m in expired_messages if should_filter_message(m, effective_config)]
+                                        if filtered_messages:
+                                            logging.info(f"🧹 过期媒体组 {media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过处理")
+                                            continue
+                                        
+                                        # 处理媒体组（异步调用）
+                                        loop.run_until_complete(process_expired_media_group(expired_messages, pair, effective_config, uid))
+                                        break
+                        except Exception as e:
+                            logging.error(f"🧹 处理过期媒体组失败: {e}")
+                        
+            except Exception as e:
+                logging.error(f"❌ 媒体组超时清理出错: {e}")
+                time.sleep(60)  # 出错后等待1分钟再试
+    
+    # 启动异步清理
+    run_async_cleanup()
 
 # 启动媒体组清理线程
 media_cleanup_thread = threading.Thread(target=start_media_group_cleanup, daemon=True)
 media_cleanup_thread.start()
 print("🧹 媒体组超时清理已启动，每30秒检查一次")
+
+async def process_expired_media_group(messages, pair, config, user_id):
+    """处理过期的媒体组消息"""
+    try:
+        # 按ID排序
+        sorted_messages = sorted(messages, key=lambda m: m.id)
+        
+        # 去重检查
+        cache_key = (messages[0].chat.id, pair['target'])
+        if cache_key not in realtime_dedupe_cache:
+            realtime_dedupe_cache[cache_key] = set()
+        
+        # 生成媒体组去重键
+        media_group_dedup_key = ("media_group", messages[0].media_group_id)
+        if media_group_dedup_key in realtime_dedupe_cache[cache_key]:
+            logging.debug(f"🧹 跳过重复的过期媒体组 {messages[0].media_group_id}")
+            return
+        
+        realtime_dedupe_cache[cache_key].add(media_group_dedup_key)
+        
+        # 收集文本内容
+        caption = ""
+        reply_markup = None
+        full_text_content = ""
+        
+        for m in sorted_messages:
+            if m.caption or m.text:
+                text_content = m.caption or m.text
+                if text_content.strip() and text_content not in full_text_content:
+                    if full_text_content:
+                        full_text_content += "\n\n" + text_content
+                    else:
+                        full_text_content = text_content
+            
+            if m.reply_to_message and m.reply_to_message.text:
+                quoted_text = m.reply_to_message.text
+                if quoted_text.strip() and quoted_text not in full_text_content:
+                    quoted_format = f"💬 引用消息：\n{quoted_text}"
+                    if full_text_content:
+                        full_text_content = quoted_format + "\n\n" + full_text_content
+                    else:
+                        full_text_content = quoted_format
+        
+        # 处理文本内容
+        if full_text_content:
+            caption, reply_markup = process_message_content(full_text_content, config)
+        
+        # 构建媒体列表
+        media_list = []
+        for i, m in enumerate(sorted_messages):
+            if m.photo:
+                media_list.append(InputMediaPhoto(m.photo.file_id, caption=caption if i == 0 else ""))
+            elif m.video:
+                media_list.append(InputMediaVideo(m.video.file_id, caption=caption if i == 0 else ""))
+        
+        if media_list:
+            # 使用全局的client实例发送媒体组
+            from csmain import app
+            await app.send_media_group(chat_id=pair['target'], media=media_list)
+            
+            if reply_markup:
+                await safe_send_button_message(app, pair['target'], reply_markup, "过期媒体组")
+            
+            logging.info(f"🧹 成功处理过期媒体组，发送 {len(media_list)} 个媒体文件到 {pair['target']}")
+        
+    except Exception as e:
+        logging.error(f"🧹 处理过期媒体组失败: {e}")
 
 import os
 import time
