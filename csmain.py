@@ -624,10 +624,31 @@ def load_running_tasks():
     try:
         if os.path.exists("running_tasks.json"):
             with open("running_tasks.json", "r", encoding="utf-8") as f:
-                running_tasks = json.load(f)
-            logging.info("运行中任务快照已载入。")
+                loaded_data = json.load(f)
+                
+                # 数据验证和修复
+                cleaned_data = {}
+                for user_id, user_tasks in loaded_data.items():
+                    if not isinstance(user_tasks, dict):
+                        logging.warning(f"跳过无效的用户任务数据: {user_id} = {type(user_tasks)}")
+                        continue
+                    
+                    cleaned_user_tasks = {}
+                    for task_id, task_data in user_tasks.items():
+                        if isinstance(task_data, dict) and "clone_tasks" in task_data:
+                            cleaned_user_tasks[task_id] = task_data
+                        else:
+                            logging.warning(f"跳过无效的任务数据: {user_id}/{task_id} = {type(task_data)}")
+                    
+                    if cleaned_user_tasks:
+                        cleaned_data[user_id] = cleaned_user_tasks
+                
+                running_tasks = cleaned_data
+                logging.info(f"运行中任务快照已载入并清理，有效数据: {len(cleaned_data)} 个用户")
+                
     except Exception as e:
         logging.error(f"载入运行中任务失败: {e}")
+        running_tasks = {}
 
 # ==================== 配置日志系统 ====================
 LOG_FILE = "bot_errors.log"
@@ -3154,7 +3175,20 @@ async def view_config(message, user_id):
 
 async def view_tasks(message, user_id):
     tasks = user_states.get(user_id, [])
-    snapshots = running_tasks.get(str(user_id), {})
+    
+    # 安全获取 snapshots，添加数据验证
+    try:
+        user_running_tasks = running_tasks.get(str(user_id), {})
+        # 验证数据结构，过滤掉无效数据
+        snapshots = {}
+        for tid, snap in user_running_tasks.items():
+            if isinstance(snap, dict) and "clone_tasks" in snap:
+                snapshots[tid] = snap
+            else:
+                logging.warning(f"用户 {user_id} 的 running_tasks 中存在无效数据: {tid} = {type(snap)}")
+    except Exception as e:
+        logging.error(f"处理用户 {user_id} 的 running_tasks 时出错: {e}")
+        snapshots = {}
 
     text = "📋 **任务管理中心**\n\n"
     buttons = []
@@ -3163,84 +3197,109 @@ async def view_tasks(message, user_id):
     if tasks:
         text += "🔄 **活跃任务**\n"
         for i, task in enumerate(tasks, 1):
-            task_id_short = task.get("task_id", "")[:8] if task.get("task_id") else "None"
-            state = task.get("state")
-            
-            # 简化状态显示
-            state_icons = {
-                "cloning_in_progress": "🚀 搬运中",
-                "confirming_clone": "⏳ 等待确认",
-                "selecting_pairs_for_clone": "📋 选择频道",
-                "waiting_for_range_for_pair": "📝 输入范围"
-            }
-            state_display = state_icons.get(state, f"🔧 {state}")
-            
-            text += f"\n**{i}.** `{task_id_short}` - {state_display}\n"
-            
-            # 只显示基本信息
-            if "clone_tasks" in task:
-                clone_tasks = task["clone_tasks"]
-                text += f"📂 频道组: {len(clone_tasks)}个\n"
+            try:
+                task_id_short = task.get("task_id", "")[:8] if task.get("task_id") else "None"
+                state = task.get("state")
                 
-                # 如果是搬运中状态，显示简单进度
+                # 简化状态显示
+                state_icons = {
+                    "cloning_in_progress": "🚀 搬运中",
+                    "confirming_clone": "⏳ 等待确认",
+                    "selecting_pairs_for_clone": "📋 选择频道",
+                    "waiting_for_range_for_pair": "📝 输入范围"
+                }
+                state_display = state_icons.get(state, f"🔧 {state}")
+                
+                text += f"\n**{i}.** `{task_id_short}` - {state_display}\n"
+                
+                # 只显示基本信息
+                if "clone_tasks" in task:
+                    clone_tasks = task["clone_tasks"]
+                    if isinstance(clone_tasks, list):
+                        text += f"📂 频道组: {len(clone_tasks)}个\n"
+                        
+                        # 如果是搬运中状态，显示简单进度
+                        if state == "cloning_in_progress":
+                            progress = task.get("progress", {})
+                            if isinstance(progress, dict):
+                                total_cloned = 0
+                                for j, sub_task in enumerate(clone_tasks):
+                                    sub_progress = progress.get(f"sub_task_{j}", {}) or progress.get(str(j), {})
+                                    if isinstance(sub_progress, dict):
+                                        cloned = sub_progress.get("cloned_count", 0) or sub_progress.get("cloned", 0)
+                                        total_cloned += cloned
+                                
+                                if total_cloned > 0:
+                                    text += f"📊 已搬运: {total_cloned} 条消息\n"
+                
+                # 操作按钮
                 if state == "cloning_in_progress":
-                    progress = task.get("progress", {})
-                    total_cloned = 0
-                    for j, sub_task in enumerate(clone_tasks):
-                        sub_progress = progress.get(f"sub_task_{j}", {}) or progress.get(str(j), {})
-                        cloned = sub_progress.get("cloned_count", 0) or sub_progress.get("cloned", 0)
-                        total_cloned += cloned
-                    
-                    if total_cloned > 0:
-                        text += f"📊 已搬运: {total_cloned} 条消息\n"
-            
-            # 操作按钮
-            if state == "cloning_in_progress":
-                buttons.append([InlineKeyboardButton(f"⏹ 停止任务", callback_data=f"cancel:{task['task_id']}")])
-            elif state == "confirming_clone":
-                buttons.append([
-                    InlineKeyboardButton(f"✅ 开始搬运", callback_data=f"confirm_clone_action:{task['task_id']}"),
-                    InlineKeyboardButton(f"❌ 取消", callback_data=f"cancel:{task['task_id']}")
-                ])
-            elif isinstance(state, str) and state.startswith("waiting_for"):
-                buttons.append([InlineKeyboardButton(f"❌ 取消", callback_data=f"cancel:{task['task_id']}")])
+                    buttons.append([InlineKeyboardButton(f"⏹ 停止任务", callback_data=f"cancel:{task['task_id']}")])
+                elif state == "confirming_clone":
+                    buttons.append([
+                        InlineKeyboardButton(f"✅ 开始搬运", callback_data=f"confirm_clone_action:{task['task_id']}"),
+                        InlineKeyboardButton(f"❌ 取消", callback_data=f"cancel:{task['task_id']}")
+                    ])
+                elif isinstance(state, str) and state.startswith("waiting_for"):
+                    buttons.append([InlineKeyboardButton(f"❌ 取消", callback_data=f"cancel:{task['task_id']}")])
+            except Exception as e:
+                logging.error(f"处理任务 {i} 时出错: {e}")
+                text += f"\n**{i}.** ❌ 任务数据错误\n"
+                continue
 
     # 可恢复任务 - 简化显示
     if snapshots:
-        cancelled_count = sum(1 for snap in snapshots.values() if snap.get("cancelled"))
-        normal_count = len(snapshots) - cancelled_count
-        
-        text += f"\n📦 **可恢复任务** ({len(snapshots)}个)\n"
-        text += f"• 被取消: {cancelled_count}个 | 意外中断: {normal_count}个\n\n"
-        
-        for i, (tid, snap) in enumerate(snapshots.items(), 1):
-            tid_short = tid[:8]
-            clone_tasks = snap.get("clone_tasks", [])
-            is_cancelled = snap.get("cancelled", False)
+        try:
+            cancelled_count = sum(1 for snap in snapshots.values() if isinstance(snap, dict) and snap.get("cancelled"))
+            normal_count = len(snapshots) - cancelled_count
             
-            # 简化状态显示
-            status_emoji = "❌" if is_cancelled else "⏭️"
-            status_text = "被取消" if is_cancelled else "意外中断"
+            text += f"\n📦 **可恢复任务** ({len(snapshots)}个)\n"
+            text += f"• 被取消: {cancelled_count}个 | 意外中断: {normal_count}个\n\n"
             
-            text += f"**{i}.** `{tid_short}` - {status_emoji} {status_text}\n"
-            
-            # 显示简单进度
-            progress = snap.get("progress", {})
-            total_cloned = 0
-            for j, sub in enumerate(clone_tasks):
-                sub_progress = progress.get(f"sub_task_{j}", {}) or progress.get(str(j), {})
-                cloned = sub_progress.get("cloned_count", 0) or sub_progress.get("cloned", 0)
-                total_cloned += cloned
-            
-            if total_cloned > 0:
-                text += f"📊 已搬运: {total_cloned} 条消息\n"
-            
-            text += f"📂 频道组: {len(clone_tasks)}个\n"
-            
-            buttons.append([
-                InlineKeyboardButton(f"▶️ 续传", callback_data=f"resume:{tid}"),
-                InlineKeyboardButton(f"🗑 删除", callback_data=f"drop_running:{tid}")
-            ])
+            for i, (tid, snap) in enumerate(snapshots.items(), 1):
+                try:
+                    if not isinstance(snap, dict):
+                        continue
+                        
+                    tid_short = tid[:8] if isinstance(tid, str) else str(tid)[:8]
+                    clone_tasks = snap.get("clone_tasks", [])
+                    if not isinstance(clone_tasks, list):
+                        continue
+                        
+                    is_cancelled = snap.get("cancelled", False)
+                    
+                    # 简化状态显示
+                    status_emoji = "❌" if is_cancelled else "⏭️"
+                    status_text = "被取消" if is_cancelled else "意外中断"
+                    
+                    text += f"**{i}.** `{tid_short}` - {status_emoji} {status_text}\n"
+                    
+                    # 显示简单进度
+                    progress = snap.get("progress", {})
+                    if isinstance(progress, dict):
+                        total_cloned = 0
+                        for j, sub in enumerate(clone_tasks):
+                            sub_progress = progress.get(f"sub_task_{j}", {}) or progress.get(str(j), {})
+                            if isinstance(sub_progress, dict):
+                                cloned = sub_progress.get("cloned_count", 0) or sub_progress.get("cloned", 0)
+                                total_cloned += cloned
+                        
+                        if total_cloned > 0:
+                            text += f"📊 已搬运: {total_cloned} 条消息\n"
+                    
+                    text += f"📂 频道组: {len(clone_tasks)}个\n"
+                    
+                    buttons.append([
+                        InlineKeyboardButton(f"▶️ 续传", callback_data=f"resume:{tid}"),
+                        InlineKeyboardButton(f"🗑 删除", callback_data=f"drop_running:{tid}")
+                    ])
+                except Exception as e:
+                    logging.error(f"处理可恢复任务 {tid} 时出错: {e}")
+                    text += f"**{i}.** ❌ 任务数据错误\n"
+                    continue
+        except Exception as e:
+            logging.error(f"处理可恢复任务列表时出错: {e}")
+            text += "\n❌ 可恢复任务数据错误\n"
 
     # 如果没有任务
     if not tasks and not snapshots:
