@@ -167,10 +167,19 @@ class TelegramConnectionPool:
             return await self._wait_for_available_connection()
     
     async def _create_new_connection(self, client):
-        """创建新连接"""
+        """创建新连接 - 仅用于API调用，不处理消息"""
         try:
-            # 创建新的客户端连接
-            new_client = client.copy()
+            # 创建新的客户端连接，但不复制消息处理器
+            from pyrogram import Client
+            from config import get_bot_config
+            
+            bot_config = get_bot_config()
+            new_client = Client(
+                f"{bot_config['bot_id']}_pool_{len(self.connections)}",
+                api_id=bot_config['api_id'],
+                api_hash=bot_config['api_hash'],
+                bot_token=bot_config['bot_token']
+            )
             await new_client.start()
             
             # 添加到连接池
