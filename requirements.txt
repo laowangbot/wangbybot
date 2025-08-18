@@ -3,3 +3,4 @@ pyrogram>=2.0.0
 tgcrypto>=1.2.5
 firebase-admin>=6.2.0
 google-cloud-firestore>=2.11.0
+simple-firebase-storage>=1.0.0
