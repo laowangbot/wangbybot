@@ -6423,15 +6423,8 @@ if __name__ == "__main__":
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, signal_handler)
     
-    # 在后台启动端口服务器
-    import threading
-    port_thread = threading.Thread(target=start_port_server, daemon=True)
-    port_thread.start()
-    
-    # 启动心跳线程
-    heartbeat_thread = threading.Thread(target=start_heartbeat, daemon=True)
-    heartbeat_thread.start()
-    print(f"💓 [{bot_config['bot_id']}] 心跳机制已启动，每10分钟发送一次请求")
+    # 端口服务器和心跳线程已在文件开头启动，无需重复启动
+    print(f"💓 [{bot_config['bot_id']}] 心跳机制运行中")
     
     load_configs()
     load_history()
