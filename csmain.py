@@ -2068,15 +2068,16 @@ async def callback_handler(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
     
-    # 登录系统已移除，所有用户可直接使用
-    logging.info(f"用户 {user_id} 点击了回调按钮: {data}")
-    
-    # 安全地处理回调查询，避免 QUERY_ID_INVALID 错误
-    try:
-        await callback_query.answer()
-    except Exception as answer_error:
-        logging.warning(f"回调查询应答失败，继续处理: {answer_error}")
-        # 继续处理，不因为应答失败而中断
+    try:  # 添加全局异常处理
+        # 登录系统已移除，所有用户可直接使用
+        logging.info(f"用户 {user_id} 点击了回调按钮: {data}")
+        
+        # 安全地处理回调查询，避免 QUERY_ID_INVALID 错误
+        try:
+            await callback_query.answer()
+        except Exception as answer_error:
+            logging.warning(f"回调查询应答失败，继续处理: {answer_error}")
+            # 继续处理，不因为应答失败而中断
 
     if data == "show_main_menu":
         await show_main_menu(callback_query.message, user_id)
@@ -2377,6 +2378,20 @@ async def callback_handler(client, callback_query):
             await callback_query.answer("ℹ️ 这是功能分类标题", show_alert=False)
         except Exception as e:
             logging.warning(f"回调查询应答失败: {e}")
+    
+    except Exception as callback_error:
+        # 全局异常处理
+        logging.error(f"回调处理异常 - 用户: {user_id}, 数据: {data}, 错误: {callback_error}")
+        try:
+            await safe_edit_or_reply(
+                callback_query.message, 
+                "❌ 操作失败，请重试或联系管理员。",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")
+                ]])
+            )
+        except Exception as fallback_error:
+            logging.error(f"回调错误处理失败: {fallback_error}")
 
 # ==================== 智能搬运优化命令 ====================
 @app.on_message(filters.command("optimize") & filters.private)
