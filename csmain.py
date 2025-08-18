@@ -1103,13 +1103,30 @@ def load_history():
     if os.path.exists(config_file):
         try:
             with open(config_file, "r", encoding="utf-8") as f:
-                user_history = json.load(f)
-            logging.info(f"[{bot_config['bot_id']}] 历史记录已载入。")
+                loaded_data = json.load(f)
+                
+                # 数据验证和修复
+                if isinstance(loaded_data, dict):
+                    # 验证每个用户的历史记录是否为列表
+                    cleaned_data = {}
+                    for user_id, history_list in loaded_data.items():
+                        if isinstance(history_list, list):
+                            cleaned_data[user_id] = history_list
+                        else:
+                            logging.warning(f"用户 {user_id} 的历史记录数据类型错误: {type(history_list)}")
+                            cleaned_data[user_id] = []
+                    
+                    user_history = cleaned_data
+                    logging.info(f"[{bot_config['bot_id']}] 历史记录已载入并验证，有效用户: {len(cleaned_data)} 个")
+                else:
+                    logging.error(f"[{bot_config['bot_id']}] 历史记录文件格式错误，期望字典，实际: {type(loaded_data)}")
+                    user_history = {}
+                    
         except Exception as e:
             logging.error(f"[{bot_config['bot_id']}] 读取历史记录失败: {e}")
-            user_history = []
+            user_history = {}
     else:
-        user_history = []
+        user_history = {}
 
 # ==================== 按钮设置 ====================
 def get_main_menu_buttons(user_id):
@@ -3320,7 +3337,25 @@ async def view_tasks(message, user_id):
     await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def view_history(message, user_id, page=0):
-    history_list = user_history.get(str(user_id), [])
+    global user_history
+    
+    # 安全检查：确保 user_history 是字典类型
+    if not isinstance(user_history, dict):
+        logging.error(f"user_history 数据类型错误: {type(user_history)}，重置为字典")
+        user_history = {}
+    
+    # 安全获取用户历史记录
+    try:
+        history_list = user_history.get(str(user_id), [])
+        if not isinstance(history_list, list):
+            logging.warning(f"用户 {user_id} 的历史记录数据类型错误: {type(history_list)}，重置为列表")
+            history_list = []
+            user_history[str(user_id)] = history_list
+    except Exception as e:
+        logging.error(f"获取用户 {user_id} 历史记录时出错: {e}")
+        history_list = []
+        user_history[str(user_id)] = history_list
+    
     if not history_list:
         text = "📋 **历史记录**\n\n🌟 **暂无记录**\n\n"
         text += "💡 完成搬运任务后，历史记录会在这里显示。"
@@ -3348,47 +3383,57 @@ async def view_history(message, user_id, page=0):
         
         # 显示当前页的记录 - 简化显示
         for i, record in enumerate(current_records):
-            display_index = start_idx + i + 1  # 从1开始编号
-            timestamp = record.get('timestamp', '')
-            source = record.get('source', '')
-            target = record.get('target', '') 
-            start_id = record.get('start_id', 0)
-            end_id = record.get('end_id', 0)
-            cloned_count = record.get('cloned_count', 0)
-            status = record.get('status', '完成')
-            
-            # 简化时间显示
             try:
-                date_part = timestamp.split(' ')[0] if timestamp else ''
-                time_part = timestamp.split(' ')[1] if len(timestamp.split(' ')) > 1 else ''
-                time_display = f"{date_part} {time_part}" if date_part and time_part else timestamp
-            except:
-                time_display = timestamp
-            
-            # 状态图标
-            status_icon = "✅" if status == "完成" else "❌"
-            
-            text += f"**{i}.** {status_icon} {time_display}\n"
-            text += f"📤 `{source}` ➜ `{target}`\n"
-            text += f"📊 范围: {start_id}-{end_id} | 已搬运: **{cloned_count}** 条\n"
-            
-            # 显示状态
-            if status != "完成":
-                text += f"⚠️ 状态: {status}\n"
-            
-            text += "\n"
-            
-            # 显示详细统计
-            if photo_count > 0 or video_count > 0 or file_count > 0 or text_count > 0:
-                stats_parts = []
-                if photo_count > 0: stats_parts.append(f"🖼️ {photo_count}")
-                if video_count > 0: stats_parts.append(f"🎥 {video_count}")
-                if file_count > 0: stats_parts.append(f"📁 {file_count}")
-                if text_count > 0: stats_parts.append(f"📝 {text_count}")
-                if media_group_count > 0: stats_parts.append(f"🖼️📱 {media_group_count}")
-                text += f"   📈 详情: {' | '.join(stats_parts)}\n"
-            
-            text += "\n"
+                display_index = start_idx + i + 1  # 从1开始编号
+                timestamp = record.get('timestamp', '')
+                source = record.get('source', '')
+                target = record.get('target', '') 
+                start_id = record.get('start_id', 0)
+                end_id = record.get('end_id', 0)
+                cloned_count = record.get('cloned_count', 0)
+                status = record.get('status', '完成')
+                
+                # 获取详细统计信息
+                photo_count = record.get('photo_count', 0)
+                video_count = record.get('video_count', 0)
+                file_count = record.get('file_count', 0)
+                text_count = record.get('text_count', 0)
+                media_group_count = record.get('media_group_count', 0)
+                
+                # 简化时间显示
+                try:
+                    date_part = timestamp.split(' ')[0] if timestamp else ''
+                    time_part = timestamp.split(' ')[1] if len(timestamp.split(' ')) > 1 else ''
+                    time_display = f"{date_part} {time_part}" if date_part and time_part else timestamp
+                except:
+                    time_display = timestamp
+                
+                # 状态图标
+                status_icon = "✅" if status == "完成" else "❌"
+                
+                text += f"**{i}.** {status_icon} {time_display}\n"
+                text += f"📤 `{source}` ➜ `{target}`\n"
+                text += f"📊 范围: {start_id}-{end_id} | 已搬运: **{cloned_count}** 条\n"
+                
+                # 显示状态
+                if status != "完成":
+                    text += f"⚠️ 状态: {status}\n"
+                
+                # 显示详细统计
+                if photo_count > 0 or video_count > 0 or file_count > 0 or text_count > 0 or media_group_count > 0:
+                    stats_parts = []
+                    if photo_count > 0: stats_parts.append(f"🖼️ {photo_count}")
+                    if video_count > 0: stats_parts.append(f"🎥 {video_count}")
+                    if file_count > 0: stats_parts.append(f"📁 {file_count}")
+                    if text_count > 0: stats_parts.append(f"📝 {text_count}")
+                    if media_group_count > 0: stats_parts.append(f"🖼️📱 {media_group_count}")
+                    text += f"   📈 详情: {' | '.join(stats_parts)}\n"
+                
+                text += "\n"
+            except Exception as e:
+                logging.error(f"处理历史记录 {i} 时出错: {e}")
+                text += f"**{i}.** ❌ 记录数据错误\n\n"
+                continue
 
         # 统计信息
         total_cloned = sum(record.get('cloned_count', 0) for record in history_list)
