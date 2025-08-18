@@ -24,6 +24,7 @@ class FirebaseStorage:
     def _initialize_firebase(self):
         """初始化Firebase连接"""
         if not FIREBASE_AVAILABLE:
+            logging.warning(f"[{self.bot_id}] Firebase模块不可用")
             return
         
         try:
@@ -33,29 +34,64 @@ class FirebaseStorage:
             try:
                 # 尝试获取已存在的应用实例
                 app = firebase_admin.get_app(app_name)
-                logging.info(f"使用已存在的Firebase应用实例: {app_name}")
+                logging.info(f"[{self.bot_id}] 使用已存在的Firebase应用实例: {app_name}")
             except ValueError:
                 # 应用不存在，创建新的
                 firebase_credentials = os.getenv('FIREBASE_CREDENTIALS')
                 if firebase_credentials:
                     try:
+                        # 添加调试信息
+                        logging.info(f"[{self.bot_id}] 开始解析Firebase凭据，长度: {len(firebase_credentials)}")
+                        
+                        # 清理可能的换行符和空格
+                        firebase_credentials = firebase_credentials.strip().replace('\n', '').replace('\r', '')
+                        
                         service_account_info = json.loads(firebase_credentials)
+                        
+                        # 验证必要字段
+                        required_fields = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+                        missing_fields = [field for field in required_fields if field not in service_account_info]
+                        if missing_fields:
+                            logging.error(f"[{self.bot_id}] Firebase凭据缺少必要字段: {missing_fields}")
+                            return
+                        
                         cred = credentials.Certificate(service_account_info)
                         app = firebase_admin.initialize_app(cred, name=app_name)
-                        logging.info(f"创建新的Firebase应用实例: {app_name}")
+                        logging.info(f"[{self.bot_id}] 创建新的Firebase应用实例: {app_name}")
+                        
                     except json.JSONDecodeError as e:
-                        logging.error(f"Firebase凭据JSON解析失败: {e}")
+                        logging.error(f"[{self.bot_id}] Firebase凭据JSON解析失败: {e}")
+                        logging.error(f"[{self.bot_id}] 凭据前100字符: {firebase_credentials[:100]}...")
+                        return
+                    except Exception as e:
+                        logging.error(f"[{self.bot_id}] Firebase凭据处理失败: {e}")
                         return
                 else:
-                    logging.warning(f"未找到FIREBASE_CREDENTIALS环境变量 (bot_id: {self.bot_id})")
+                    logging.warning(f"[{self.bot_id}] 未找到FIREBASE_CREDENTIALS环境变量")
                     return
             
+            # 初始化Firestore客户端
             self.db = firestore.client(app)
             self.project_id = os.getenv('FIREBASE_PROJECT_ID', 'unknown')
-            logging.info(f"[{self.bot_id}] Firebase已连接，项目ID: {self.project_id}")
+            
+            # 测试连接
+            try:
+                # 尝试访问一个测试集合来验证连接
+                test_collection = self.db.collection(f'connection_test_{self.bot_id}')
+                test_doc = test_collection.document('test')
+                test_doc.set({'test': True, 'timestamp': firestore.SERVER_TIMESTAMP})
+                logging.info(f"[{self.bot_id}] Firebase连接测试成功，项目ID: {self.project_id}")
+            except Exception as e:
+                logging.error(f"[{self.bot_id}] Firebase连接测试失败: {e}")
+                self.db = None
+                return
+            
+            logging.info(f"[{self.bot_id}] Firebase已成功连接，项目ID: {self.project_id}")
             
         except Exception as e:
             logging.error(f"[{self.bot_id}] Firebase初始化失败: {e}")
+            import traceback
+            logging.error(f"[{self.bot_id}] 详细错误信息: {traceback.format_exc()}")
             self.db = None
     
     def is_available(self) -> bool:
