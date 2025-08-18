@@ -123,18 +123,18 @@ def start_media_group_cleanup():
                 
                 for key, messages in listen_media_groups.items():
                     if messages:
-                        # 检查最早的消息是否超过30秒
+                        # 检查最早的消息是否超过60秒（从30秒改为60秒）
                         earliest_time = getattr(messages[0], 'date', None)
                         if earliest_time:
                             time_diff = current_time - earliest_time.timestamp()
-                            if time_diff > 30:  # 超过30秒的媒体组强制处理
+                            if time_diff > 60:  # 延长到60秒，避免与10秒实时处理冲突
                                 expired_keys.append(key)
                 
                 # 处理过期的媒体组
                 for key in expired_keys:
                     if key in listen_media_groups:
                         expired_messages = listen_media_groups.pop(key)
-                        logging.info(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息")
+                        logging.warning(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息（可能不完整）")
                         
                         # 强制处理过期的媒体组，避免被分割
                         try:
@@ -185,18 +185,20 @@ print("🧹 媒体组超时清理已启动，每30秒检查一次")
 async def process_expired_media_group(messages, pair, config, user_id):
     """处理过期的媒体组消息"""
     try:
-        # 按ID排序
-        sorted_messages = sorted(messages, key=lambda m: m.id)
+        # 使用统一排序：按ID为主，date为辅
+        sorted_messages = sorted(messages, key=lambda m: (m.id, getattr(m, 'date', 0)))
         
         # 去重检查
         cache_key = (messages[0].chat.id, pair['target'])
         if cache_key not in realtime_dedupe_cache:
             realtime_dedupe_cache[cache_key] = set()
         
-        # 生成媒体组去重键
-        media_group_dedup_key = ("media_group", messages[0].media_group_id)
+        # 生成媒体组去重键：包含消息范围和数量，避免与实时路径冲突
+        first_id = min(m.id for m in sorted_messages)
+        last_id = max(m.id for m in sorted_messages)
+        media_group_dedup_key = ("media_group", sorted_messages[0].media_group_id, first_id, last_id, len(sorted_messages))
         if media_group_dedup_key in realtime_dedupe_cache[cache_key]:
-            logging.debug(f"🧹 跳过重复的过期媒体组 {messages[0].media_group_id}")
+            logging.debug(f"🧹 跳过重复的过期媒体组 {sorted_messages[0].media_group_id} ({first_id}-{last_id}, {len(sorted_messages)}条)")
             return
         
         realtime_dedupe_cache[cache_key].add(media_group_dedup_key)
@@ -239,10 +241,26 @@ async def process_expired_media_group(messages, pair, config, user_id):
         if media_list:
             # 使用全局的client实例发送媒体组
             from csmain import app
+            
+            # 如果有按钮，将按钮文本添加到第一个媒体的caption中，避免分成两条消息
+            if reply_markup and media_list:
+                button_text = "\n\n📋 按钮："
+                for row in reply_markup.inline_keyboard:
+                    for button in row:
+                        if hasattr(button, 'text') and hasattr(button, 'url') and button.text and button.url:
+                            button_text += f"\n• {button.text}: {button.url}"
+                
+                # 将按钮信息添加到第一个媒体的caption中
+                if media_list[0].caption:
+                    media_list[0].caption += button_text
+                else:
+                    media_list[0].caption = button_text.strip()
+            
             await app.send_media_group(chat_id=pair['target'], media=media_list)
             
-            if reply_markup:
-                await safe_send_button_message(app, pair['target'], reply_markup, "过期媒体组")
+            # 移除单独的按钮发送，避免分成两条消息
+            # if reply_markup:
+            #     await safe_send_button_message(app, pair['target'], reply_markup, "过期媒体组")
             
             logging.info(f"🧹 成功处理过期媒体组，发送 {len(media_list)} 个媒体文件到 {pair['target']}")
         
@@ -931,28 +949,39 @@ running_task_cancellation = {}  # 任务ID -> 取消标志
 
 # ==================== 通用辅助 ====================
 def _is_media_group_complete(messages):
-    """检查媒体组是否完整（基于消息ID连续性和时间间隔）"""
+    """检查媒体组是否完整（保守策略：延长等待时间，减少误判）"""
     if len(messages) < 2:
         return False
     
-    # 按ID排序
+    # 按ID排序检查连续性
     sorted_messages = sorted(messages, key=lambda m: m.id)
     
-    # 检查ID是否连续（允许最多1个ID间隔）
-    for i in range(1, len(sorted_messages)):
-        if sorted_messages[i].id - sorted_messages[i-1].id > 2:
-            return False  # ID间隔过大，可能还有更多消息
+    # 更保守的完整性判断：需要更多证据表明媒体组真的完整了
+    if len(sorted_messages) >= 5:  # 提高门槛，避免过早触发
+        max_gap = 0
+        for i in range(1, len(sorted_messages)):
+            gap = sorted_messages[i].id - sorted_messages[i-1].id
+            max_gap = max(max_gap, gap)
+        
+        # 如果最大ID间隔不超过2，且时间间隔超过8秒，才认为完整
+        if max_gap <= 2:
+            first_time = getattr(sorted_messages[0], 'date', None)
+            last_time = getattr(sorted_messages[-1], 'date', None)
+            if first_time and last_time:
+                time_diff = (last_time - first_time).total_seconds()
+                if time_diff > 8:  # 提高时间门槛到8秒
+                    return True
     
-    # 检查时间间隔（如果消息间隔超过10秒，认为组完整）
+    # 只有在时间间隔非常长的情况下才强制认为完整
     if len(sorted_messages) >= 2:
         first_time = getattr(sorted_messages[0], 'date', None)
         last_time = getattr(sorted_messages[-1], 'date', None)
         if first_time and last_time:
             time_diff = (last_time - first_time).total_seconds()
-            if time_diff > 10:  # 如果时间间隔超过10秒，认为组完整
+            if time_diff > 15:  # 15秒没有新消息才认为真的完整了
                 return True
     
-    return True  # 默认认为组完整
+    return False  # 默认认为不完整，继续等待
 
 def parse_channel_identifier(raw: str):
     s = (raw or "").strip()
@@ -2956,16 +2985,29 @@ async def listen_and_clone(client, message):
             key = (message.chat.id, message.media_group_id)
             listen_media_groups.setdefault(key, []).append(message)
             
-            # 改进的触发条件 - 降低门槛，避免媒体组被分割
+            # 更保守的触发策略，避免媒体组被拆分
             messages = listen_media_groups[key]
-            should_process = (
-                len(messages) >= 2 or  # 有2个或更多消息就处理（降低门槛）
-                (len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 5)  # 或等待5秒
-            )
+            should_process = False
+            
+            # 只在非常确定的情况下才立即处理
+            if _is_media_group_complete(messages):
+                should_process = True
+                logging.info(f"🔍 媒体组 {message.media_group_id} 确认完整({len(messages)}条)，立即处理")
+            elif len(messages) >= 20:  # 防止超大媒体组卡住（提高上限）
+                should_process = True
+                logging.info(f"🔍 媒体组 {message.media_group_id} 消息数过多({len(messages)})，强制处理")
+            elif len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 10:
+                # 延长等待时间到10秒，给更多时间收集完整媒体组
+                should_process = True
+                logging.info(f"🔍 媒体组 {message.media_group_id} 等待超时({len(messages)}条，10秒)，强制处理")
             
             if not should_process:
+                logging.debug(f"🔍 媒体组 {message.media_group_id} 等待更多消息({len(messages)}条)")
                 return
-            group_messages = sorted(listen_media_groups.pop(key), key=lambda m: m.id)
+                
+            # 使用统一的排序逻辑
+            group_messages = sorted(listen_media_groups.pop(key), key=lambda m: (m.id, getattr(m, 'date', 0)))
+            logging.info(f"📦 准备处理媒体组 {message.media_group_id}，最终包含 {len(group_messages)} 条消息")
             # 过滤整组
             logging.info(f"🔍 实时监听: 开始过滤检查媒体组 {message.media_group_id}，包含 {len(group_messages)} 条消息")
             filtered_messages = [m for m in group_messages if should_filter_message(m, cfg)]
@@ -2974,15 +3016,18 @@ async def listen_and_clone(client, message):
                 continue
             logging.info(f"✅ 实时监听: 媒体组 {message.media_group_id} 通过过滤检查，继续处理")
             
-            # 实时监听媒体组去重检查
+            # 实时监听媒体组去重检查 - 改进版
             cache_key = (message.chat.id, pair['target'])
             if cache_key not in realtime_dedupe_cache:
                 realtime_dedupe_cache[cache_key] = set()
             
-            # 生成媒体组去重键（使用媒体组ID）
-            media_group_dedup_key = ("media_group", message.media_group_id)
+            # 生成基于消息范围和数量的去重键，而非仅 media_group_id
+            first_id = min(m.id for m in group_messages)
+            last_id = max(m.id for m in group_messages)
+            media_group_dedup_key = ("media_group", message.media_group_id, first_id, last_id, len(group_messages))
+            
             if media_group_dedup_key in realtime_dedupe_cache[cache_key]:
-                logging.debug(f"实时监听: 跳过重复媒体组 {message.media_group_id}")
+                logging.debug(f"实时监听: 跳过重复媒体组 {message.media_group_id} ({first_id}-{last_id}, {len(group_messages)}条)")
                 continue
             realtime_dedupe_cache[cache_key].add(media_group_dedup_key)
             media_list = []
@@ -3024,10 +3069,26 @@ async def listen_and_clone(client, message):
                     media_list.append(InputMediaVideo(m.video.file_id, caption=caption if i == 0 else ""))
             if media_list:
                 try:
+                    # 如果有按钮，将按钮文本添加到第一个媒体的caption中，避免分成两条消息
+                    if reply_markup and media_list:
+                        button_text = "\n\n📋 按钮："
+                        for row in reply_markup.inline_keyboard:
+                            for button in row:
+                                if hasattr(button, 'text') and hasattr(button, 'url') and button.text and button.url:
+                                    button_text += f"\n• {button.text}: {button.url}"
+                        
+                        # 将按钮信息添加到第一个媒体的caption中
+                        if media_list[0].caption:
+                            media_list[0].caption += button_text
+                        else:
+                            media_list[0].caption = button_text.strip()
+                    
                     await client.send_media_group(chat_id=pair['target'], media=media_list)
-                    if reply_markup:
-                        # 使用安全的按钮发送函数，避免 MESSAGE_EMPTY 错误
-                        await safe_send_button_message(client, pair['target'], reply_markup, "媒体组")
+                    
+                    # 移除单独的按钮发送，避免分成两条消息
+                    # if reply_markup:
+                    #     # 使用安全的按钮发送函数，避免 MESSAGE_EMPTY 错误
+                    #     await safe_send_button_message(client, pair['target'], reply_markup, "媒体组")
                 except Exception as e:
                     logging.error(f"监听搬运媒体组失败: {e}")
             return
