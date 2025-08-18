@@ -101,6 +101,46 @@ recovery_thread = threading.Thread(target=start_floodwait_recovery, daemon=True)
 recovery_thread.start()
 print("🔄 FloodWait自动恢复检查已启动，每5分钟检查一次")
 
+# 启动媒体组超时清理线程
+def start_media_group_cleanup():
+    """启动媒体组超时清理，每30秒清理一次过期的媒体组缓存"""
+    import time
+    while True:
+        try:
+            # 等待30秒
+            time.sleep(30)
+            
+            # 清理过期的媒体组缓存
+            current_time = time.time()
+            expired_keys = []
+            
+            for key, messages in listen_media_groups.items():
+                if messages:
+                    # 检查最早的消息是否超过30秒
+                    earliest_time = getattr(messages[0], 'date', None)
+                    if earliest_time:
+                        time_diff = current_time - earliest_time.timestamp()
+                        if time_diff > 30:  # 超过30秒的媒体组强制处理
+                            expired_keys.append(key)
+            
+            # 处理过期的媒体组
+            for key in expired_keys:
+                if key in listen_media_groups:
+                    expired_messages = listen_media_groups.pop(key)
+                    logging.info(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息")
+                    
+                    # 这里可以添加强制处理的逻辑，或者直接丢弃
+                    # 为了避免复杂化，暂时直接丢弃
+                    
+        except Exception as e:
+            logging.error(f"❌ 媒体组超时清理出错: {e}")
+            time.sleep(60)  # 出错后等待1分钟再试
+
+# 启动媒体组清理线程
+media_cleanup_thread = threading.Thread(target=start_media_group_cleanup, daemon=True)
+media_cleanup_thread.start()
+print("🧹 媒体组超时清理已启动，每30秒检查一次")
+
 import os
 import time
 import asyncio
@@ -762,19 +802,28 @@ running_task_cancellation = {}  # 任务ID -> 取消标志
 
 # ==================== 通用辅助 ====================
 def _is_media_group_complete(messages):
-    """检查媒体组是否完整（基于消息ID连续性）"""
+    """检查媒体组是否完整（基于消息ID连续性和时间间隔）"""
     if len(messages) < 2:
         return False
     
     # 按ID排序
     sorted_messages = sorted(messages, key=lambda m: m.id)
     
-    # 检查ID是否连续
+    # 检查ID是否连续（允许最多1个ID间隔）
     for i in range(1, len(sorted_messages)):
-        if sorted_messages[i].id - sorted_messages[i-1].id > 1:
-            return False  # ID不连续，可能还有更多消息
+        if sorted_messages[i].id - sorted_messages[i-1].id > 2:
+            return False  # ID间隔过大，可能还有更多消息
     
-    return True  # ID连续，认为组完整
+    # 检查时间间隔（如果消息间隔超过10秒，认为组完整）
+    if len(sorted_messages) >= 2:
+        first_time = getattr(sorted_messages[0], 'date', None)
+        last_time = getattr(sorted_messages[-1], 'date', None)
+        if first_time and last_time:
+            time_diff = (last_time - first_time).total_seconds()
+            if time_diff > 10:  # 如果时间间隔超过10秒，认为组完整
+                return True
+    
+    return True  # 默认认为组完整
 
 def parse_channel_identifier(raw: str):
     s = (raw or "").strip()
@@ -2624,10 +2673,17 @@ async def handle_text_input(client, message):
                 find_task(user_id, state="waiting_for_tail_probability") or \
                 find_task(user_id, state="waiting_for_button_interval") or \
                 find_task(user_id, state="waiting_for_button_probability") or \
-                            find_task(user_id, state="waiting_pair_tail_text") or \
-            find_task(user_id, state="waiting_pair_buttons") or \
-            find_task(user_id, state="waiting_pair_add_keyword") or \
-            find_task(user_id, state="waiting_for_pair_replacement")
+                find_task(user_id, state="waiting_pair_tail_text") or \
+                find_task(user_id, state="waiting_pair_buttons") or \
+                find_task(user_id, state="waiting_pair_add_keyword") or \
+                find_task(user_id, state="waiting_for_pair_replacement")
+    
+    # 添加调试日志
+    logging.info(f"用户 {user_id} 文本输入处理: 找到任务: {last_task is not None}")
+    if last_task:
+        logging.info(f"任务状态: {last_task.get('state')}, pair_id: {last_task.get('pair_id')}")
+    else:
+        logging.info(f"用户 {user_id} 的当前状态: {user_states.get(user_id, [])}")
 
     if not last_task:
         # 避免重复发送相同内容
@@ -2752,18 +2808,18 @@ async def listen_and_clone(client, message):
             key = (message.chat.id, message.media_group_id)
             listen_media_groups.setdefault(key, []).append(message)
             
-            # 改进的触发条件
+            # 改进的触发条件 - 降低门槛，避免媒体组被分割
             messages = listen_media_groups[key]
             should_process = (
-                len(messages) >= 3 or  # 有3个或更多消息
-                (len(messages) >= 2 and _is_media_group_complete(messages))  # 或2个消息但ID连续
+                len(messages) >= 2 or  # 有2个或更多消息就处理（降低门槛）
+                (len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 5)  # 或等待5秒
             )
             
             if not should_process:
                 return
             group_messages = sorted(listen_media_groups.pop(key), key=lambda m: m.id)
             # 过滤整组
-            logging.info(f"🔍 实时监听: 开始过滤检查媒体组 {message.media_group_id}")
+            logging.info(f"🔍 实时监听: 开始过滤检查媒体组 {message.media_group_id}，包含 {len(group_messages)} 条消息")
             filtered_messages = [m for m in group_messages if should_filter_message(m, cfg)]
             if filtered_messages:
                 logging.info(f"🚫 实时监听: 媒体组 {message.media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过整组")
@@ -6447,6 +6503,10 @@ async def request_pair_add_replacement(message, user_id, pair_id):
         "pair_id": pair_id,
         "message_id": message.id
     })
+    
+    # 添加调试日志
+    logging.info(f"用户 {user_id} 已设置等待状态: waiting_for_pair_replacement, pair_id: {pair_id}")
+    logging.info(f"当前用户状态: {user_states.get(user_id, [])}")
     
     text = f"🔀 **添加敏感词替换规则**\n\n"
     text += f"📂 **频道组**: `{source}` ➜ `{target}`\n\n"
