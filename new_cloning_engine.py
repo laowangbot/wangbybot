@@ -731,8 +731,17 @@ class RobustCloningEngine:
         # 基础文本处理
         if config.get("remove_links", False):
             import re
-            # 修复：使用正确的正则表达式
-            text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', text, flags=re.MULTILINE)
+            remove_mode = config.get("remove_links_mode", "links_only")
+            
+            if remove_mode == "whole_text":
+                # 如果文本包含超链接，则整个文本都被移除
+                if re.search(r'https?://[^\s/$.?#].[^\s]*', text, flags=re.MULTILINE):
+                    text = ""  # 整个文本被移除
+                    logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
+            else:  # links_only 模式
+                # 只移除超链接，保留其他文本
+                text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', text, flags=re.MULTILINE)
+                logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
         
         # 添加尾巴文本（简化版本）
         tail_text = config.get("tail_text", "")
@@ -777,8 +786,17 @@ class RobustCloningEngine:
         
         # 移除链接
         if config.get("remove_links", False):
-            # 修复：使用正确的正则表达式
-            processed_text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', processed_text, flags=re.MULTILINE)
+            remove_mode = config.get("remove_links_mode", "links_only")
+            
+            if remove_mode == "whole_text":
+                # 如果文本包含超链接，则整个文本都被移除
+                if re.search(r'https?://[^\s/$.?#].[^\s]*', processed_text, flags=re.MULTILINE):
+                    processed_text = ""  # 整个文本被移除
+                    logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
+            else:  # links_only 模式
+                # 只移除超链接，保留其他文本
+                processed_text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', processed_text, flags=re.MULTILINE)
+                logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
         
         # 移除用户名
         if config.get("remove_usernames", False):
@@ -1395,7 +1413,8 @@ async def example_usage():
     
     # 配置
     config = {
-        "remove_links": False,
+                    "remove_links": False,
+            "remove_links_mode": "links_only",  # links_only | whole_text
         "buttons": [
             {"text": "联系客服", "url": "@support_bot"}
         ]

@@ -1037,6 +1037,7 @@ def ensure_user_config_exists(user_id):
         user_configs[user_id_str] = {
             "channel_pairs": [],
             "remove_links": False,
+        "remove_links_mode": "links_only",  # links_only | whole_text
             "remove_hashtags": False,
             "remove_usernames": False,
             "filter_photo": False,
@@ -1653,6 +1654,7 @@ async def toggle_content_removal_menu(message, user_id):
     config = user_configs.get(str(user_id), {})
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🔗 移除超链接: {'✅ 开启' if config.get('remove_links', False) else '❌ 关闭'}", callback_data="toggle_remove_links")],
+        [InlineKeyboardButton(f"🔗 处理模式: {'📝 仅移除链接' if config.get('remove_links_mode', 'links_only') == 'links_only' else '🗑️ 移除整条消息'}", callback_data="toggle_remove_links_mode")],
         [InlineKeyboardButton(f"🏷 移除Hashtags: {'✅ 开启' if config.get('remove_hashtags', False) else '❌ 关闭'}", callback_data="toggle_remove_hashtags")],
         [InlineKeyboardButton(f"👤 移除@使用者名: {'✅ 开启' if config.get('remove_usernames', False) else '❌ 关闭'}", callback_data="toggle_remove_usernames")],
         [InlineKeyboardButton("🔙 返回功能设定", callback_data="show_feature_config_menu")]
@@ -3148,6 +3150,7 @@ async def view_config(message, user_id):
     keywords = ", ".join(config.get("filter_keywords", [])) or "无"
     replacements = ", ".join([f"{k} -> {v}" for k, v in config.get("replacement_words", {}).items()]) or "无"
     remove_links = "✅" if config.get("remove_links") else "❌"
+    remove_links_mode = config.get("remove_links_mode", "links_only")
     remove_hashtags = "✅" if config.get("remove_hashtags") else "❌"
     remove_usernames = "✅" if config.get("remove_usernames") else "❌"
     filter_buttons_status = "✅" if config.get("filter_buttons") else "❌"
@@ -3172,7 +3175,7 @@ async def view_config(message, user_id):
         f"**🔧 功能设定**\n"
         f"📝 关键字过滤: `{keywords}`\n"
         f"🔀 敏感词替换: `{replacements}`\n"
-        f"🔗 移除超链接: {remove_links}\n"
+        f"🔗 移除超链接: {remove_links} ({'仅移除链接' if remove_links_mode == 'links_only' else '移除整条消息'})\n"
         f"🏷 移除Hashtags: {remove_hashtags}\n"
         f"👤 移除使用者名: {remove_usernames}\n"
         f"🚫 过滤带按钮: {filter_buttons_status}\n"
@@ -4160,6 +4163,7 @@ async def enable_pair_filters(message, user_id, pair_id):
         "replacement_words": global_config.get("replacement_words", {}).copy(),
         "file_filter_extensions": global_config.get("file_filter_extensions", []).copy(),
         "remove_links": global_config.get("remove_links", False),
+        "remove_links_mode": global_config.get("remove_links_mode", "links_only"),
         "remove_hashtags": global_config.get("remove_hashtags", False),
         "remove_usernames": global_config.get("remove_usernames", False),
         "filter_photo": global_config.get("filter_photo", False),
@@ -4584,12 +4588,13 @@ async def show_pair_content_menu(message, user_id, pair_id):
     
     # 当前设置
     remove_links = custom_filters.get("remove_links", False)
+    remove_links_mode = custom_filters.get("remove_links_mode", "links_only")
     remove_hashtags = custom_filters.get("remove_hashtags", False)
     remove_usernames = custom_filters.get("remove_usernames", False)
     
     text = f"🔗 **频道组文本内容移除设置**\n\n"
     text += f"📂 **频道组**: `{source}` ➜ `{target}`\n\n"
-    text += f"🔗 **移除链接**: {'✅ 开启' if remove_links else '❌ 关闭'}\n"
+    text += f"🔗 **移除链接**: {'✅ 开启' if remove_links else '❌ 关闭'} ({'仅移除链接' if remove_links_mode == 'links_only' else '移除整条消息'})\n"
     text += f"🏷 **移除标签**: {'✅ 开启' if remove_hashtags else '❌ 关闭'}\n"
     text += f"👤 **移除用户名**: {'✅ 开启' if remove_usernames else '❌ 关闭'}\n\n"
     
@@ -5322,8 +5327,6 @@ def should_filter_message(message, config):
     else:
         logging.debug(f"⚠️ 消息 {message.id} 过滤检查: 未配置关键词")
     
-    return False
-
     # 过滤带按钮的消息（支持策略）
     filter_buttons_enabled = config.get("filter_buttons")
     filter_buttons_mode = config.get("filter_buttons_mode", "drop")  # drop | strip | whitelist
@@ -5421,7 +5424,17 @@ def _simple_process_content(text, config):
     # 基础文本处理
     if config.get("remove_links", False):
         import re
-        processed_text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', processed_text)
+        remove_mode = config.get("remove_links_mode", "links_only")
+        
+        if remove_mode == "whole_text":
+            # 如果文本包含超链接，则整个文本都被移除
+            if re.search(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', processed_text):
+                processed_text = ""  # 整个文本被移除
+                logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
+        else:  # links_only 模式
+            # 只移除超链接，保留其他文本
+            processed_text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', processed_text)
+            logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
     
     if config.get("remove_hashtags", False):
         import re
@@ -5590,6 +5603,11 @@ async def handle_toggle_options(message, user_id, data):
     if option == "remove_links":
         user_configs[str(user_id)]["remove_links"] = not user_configs[str(user_id)].get("remove_links", False)
         logging.info(f"用户 {user_id}  toggled remove_links to {user_configs[str(user_id)]['remove_links']}")
+    elif option == "remove_links_mode":
+        current_mode = user_configs[str(user_id)].get("remove_links_mode", "links_only")
+        new_mode = "whole_text" if current_mode == "links_only" else "links_only"
+        user_configs[str(user_id)]["remove_links_mode"] = new_mode
+        logging.info(f"用户 {user_id} 切换超链接处理模式: {current_mode} -> {new_mode}")
     elif option == "remove_hashtags":
         user_configs[str(user_id)]["remove_hashtags"] = not user_configs[str(user_id)].get("remove_hashtags", False)
         logging.info(f"用户 {user_id} toggled remove_hashtags to {user_configs[str(user_id)]['remove_hashtags']}")
@@ -5830,7 +5848,17 @@ def process_message_content(text, config, message_index=0):
         
     # 移除超链接
     if config.get("remove_links"):
-        text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', text, flags=re.MULTILINE)
+        remove_mode = config.get("remove_links_mode", "links_only")
+        
+        if remove_mode == "whole_text":
+            # 如果文本包含超链接，则整个文本都被移除
+            if re.search(r'https?://[^\s/$.?#].[^\s]*', text, flags=re.MULTILINE):
+                text = ""  # 整个文本被移除
+                logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
+        else:  # links_only 模式
+            # 只移除超链接，保留其他文本
+            text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', text, flags=re.MULTILINE)
+            logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
         
     # 移除Hashtags
     if config.get("remove_hashtags"):
