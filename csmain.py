@@ -2068,16 +2068,15 @@ async def callback_handler(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
     
-    try:  # 添加全局异常处理
-        # 登录系统已移除，所有用户可直接使用
-        logging.info(f"用户 {user_id} 点击了回调按钮: {data}")
-        
-        # 安全地处理回调查询，避免 QUERY_ID_INVALID 错误
-        try:
-            await callback_query.answer()
-        except Exception as answer_error:
-            logging.warning(f"回调查询应答失败，继续处理: {answer_error}")
-            # 继续处理，不因为应答失败而中断
+    # 登录系统已移除，所有用户可直接使用
+    logging.info(f"用户 {user_id} 点击了回调按钮: {data}")
+    
+    # 安全地处理回调查询，避免 QUERY_ID_INVALID 错误
+    try:
+        await callback_query.answer()
+    except Exception as answer_error:
+        logging.warning(f"回调查询应答失败，继续处理: {answer_error}")
+        # 继续处理，不因为应答失败而中断
 
     if data == "show_main_menu":
         await show_main_menu(callback_query.message, user_id)
@@ -2379,6 +2378,10 @@ async def callback_handler(client, callback_query):
         except Exception as e:
             logging.warning(f"回调查询应答失败: {e}")
     
+    # 全局异常处理
+    try:
+        # 这里可以添加其他需要异常处理的代码
+        pass
     except Exception as callback_error:
         # 全局异常处理
         logging.error(f"回调处理异常 - 用户: {user_id}, 数据: {data}, 错误: {callback_error}")
