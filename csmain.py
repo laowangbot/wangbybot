@@ -137,13 +137,13 @@ class FloodWaitManager:
     def __init__(self):
         self.flood_wait_times = {}  # 记录每个操作的等待时间
         self.last_operation_time = {}  # 记录每个操作的最后执行时间
-        self.operation_delays = {  # 优化后的延迟配置（更保守）
-            'edit_message': 2.0,    # 编辑消息间隔2秒（从0.5秒增加）
-            'send_message': 1.5,    # 发送消息间隔1.5秒（从0.3秒增加）
-            'forward_message': 2.0, # 转发消息间隔2秒（从0.5秒增加）
-            'delete_message': 1.0,  # 删除消息间隔1秒（从0.3秒增加）
-            'copy_message': 1.5,    # 复制消息间隔1.5秒（从0.3秒增加）
-            'send_media_group': 3.0, # 发送媒体组间隔3秒（从0.5秒增加）
+        self.operation_delays = {  # 激进性能配置（最大化搬运速度）
+            'edit_message': 1.0,    # 编辑消息间隔1秒（从3.0秒大幅降低）
+            'send_message': 1.0,    # 发送消息间隔1秒（从3.0秒大幅降低）
+            'forward_message': 1.2, # 转发消息间隔1.2秒（从3.5秒大幅降低）
+            'delete_message': 0.8,  # 删除消息间隔0.8秒（从2.0秒降低）
+            'copy_message': 1.0,    # 复制消息间隔1秒（从3.0秒大幅降低）
+            'send_media_group': 2.5, # 发送媒体组间隔2.5秒（从6.0秒大幅降低）
         }
         
         # 启动时清理所有可能的遗留用户级限制数据
@@ -646,15 +646,22 @@ BOT_TOKEN = config.BOT_TOKEN
 PROGRESS_SAVE_INTERVAL = 20  # 每处理20条消息保存一次进度（保留用于断点续传）
 
 # 性能配置常量
-BATCH_SEND_SIZE = 10  # 批量发送大小
-MIN_INTERVAL = 2  # 最小发送间隔（秒）
-FLOOD_WAIT_THRESHOLD = 30  # 流量限制阈值（秒）
+BATCH_SEND_SIZE = 15  # 批量发送大小（从10提升到15）
+MIN_INTERVAL = 1.5  # 最小发送间隔（从2秒降低到1.5秒）
+FLOOD_WAIT_THRESHOLD = 45  # 流量限制阈值（从30秒提升到45秒）
 
 # 性能模式配置
-PERFORMANCE_MODE = "conservative"  # 可选: "conservative", "balanced", "aggressive"
+PERFORMANCE_MODE = "balanced"  # 从balanced提升到aggressive模式
+# ultra_conservative: 超保守模式，确保24小时连续运行不被限制
 # conservative: 保守模式，适合稳定性和避免API限制
 # balanced: 平衡模式，性能和稳定性的折中
 # aggressive: 激进模式，最大化性能，可能触发API限制
+
+# 静默模式配置
+SILENT_MODE = True  # 启用静默模式
+PROGRESS_UPDATE_INTERVAL = 30.0  # 进度更新从1秒改为30秒
+BATCH_PROGRESS_ENABLED = False   # 禁用批次进度通知
+DETAILED_LOGGING = False         # 减少详细日志
 
 # 登录系统已完全移除 - 所有用户可直接使用机器人
 
@@ -5780,7 +5787,9 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
             try:
                 async with update_lock:
                     current_time = time.time()
-                    if current_time - last_global_update < 1.0:  # 从0.3秒调整到1秒，减少更新频率
+                    # 使用动态更新间隔：静默模式30秒，正常模式1秒
+                    update_interval = PROGRESS_UPDATE_INTERVAL
+                    if current_time - last_global_update < update_interval:
                         return
                     last_global_update = current_time
                     
@@ -5788,7 +5797,8 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     
                     # 增加状态检查
                     if not any(progress["status"] == "进行中" for progress in task_progress.values()):
-                        logging.info("所有子任务已完成，停止进度更新")
+                        if not SILENT_MODE:  # 静默模式下减少日志
+                            logging.info("所有子任务已完成，停止进度更新")
                         return
                     
                     # 计算总体统计
@@ -5853,14 +5863,14 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
             if i >= max_concurrent_tasks:
                 # 超出并发限制的任务需要延迟启动
                 batch_number = i // max_concurrent_tasks
-                stagger_delay = batch_number * 3  # 每批延迟3秒，减少等待时间
+                stagger_delay = batch_number * 1.5  # 每批延迟1.5秒，进一步减少等待时间（从3秒降低）
                 logging.info(f"⏱️ 子任务 {i+1} 将在 {stagger_delay} 秒后启动（批次 {batch_number + 1}）")
                 print(f"[性能优化] 子任务 {i+1} 批次 {batch_number + 1}，延迟启动: {stagger_delay}秒")
                 await asyncio.sleep(stagger_delay)
             else:
-                # 前4个任务立即启动，只做最小延迟避免API限流
+                # 前20个任务立即启动，只做最小延迟避免API限流
                 if i > 0:
-                    min_delay = i * 0.5  # 最小延迟0.5秒
+                    min_delay = i * 0.2  # 最小延迟0.2秒（从0.5秒降低）
                     logging.debug(f"⏱️ 子任务 {i+1} 最小延迟 {min_delay} 秒（避免API限流）")
                     await asyncio.sleep(min_delay)
             
@@ -5882,15 +5892,29 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                         # 记录最后更新时间
                         task_progress[i]["last_update_time"] = time.time()
                         
-                        # 记录详细进度日志
-                        logging.info(f"子任务 {i+1} 进度更新: {progress_pct:.1f}% | 已搬运:{stats.get('successfully_cloned', 0)} | 已处理:{stats.get('total_processed', 0)}")
+                        # 静默模式下减少日志记录
+                        processed = stats.get('total_processed', 0)
+                        if not SILENT_MODE:
+                            logging.info(f"子任务 {i+1} 进度更新: {progress_pct:.1f}% | 已搬运:{stats.get('successfully_cloned', 0)} | 已处理:{processed}")
+                        elif processed % 100 == 0:  # 静默模式下每100条记录一次
+                            logging.debug(f"子任务 {i+1}: 已处理 {processed}, 已搬运 {stats.get('successfully_cloned', 0)}")
                         
-                        # 立即触发全局进度更新，不等待
-                        try:
-                            await global_progress_update()
-                            logging.debug(f"子任务 {i+1} 全局进度更新成功")
-                        except Exception as e:
-                            logging.warning(f"子任务 {i+1} 全局进度更新失败: {e}")
+                        # 静默模式下仅在重要节点触发全局更新
+                        if SILENT_MODE:
+                            # 每1000条消息或每10%进度更新一次
+                            if processed % 1000 == 0 or (processed > 0 and progress_pct % 10 < 1):
+                                try:
+                                    await global_progress_update()
+                                    logging.debug(f"子任务 {i+1} 全局进度更新成功")
+                                except Exception as e:
+                                    logging.warning(f"子任务 {i+1} 全局进度更新失败: {e}")
+                        else:
+                            # 非静默模式立即触发全局进度更新
+                            try:
+                                await global_progress_update()
+                                logging.debug(f"子任务 {i+1} 全局进度更新成功")
+                            except Exception as e:
+                                logging.warning(f"子任务 {i+1} 全局进度更新失败: {e}")
                     else:
                         logging.warning(f"子任务 {i+1} 收到无效的进度统计: {stats}")
                         
@@ -5943,7 +5967,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         
         # 启动所有子任务并发执行 - 性能优化：限制最大并发数
         # 创建真正的Task对象，而不是协程
-        max_concurrent_tasks = 10  # 激进配置：单任务内10个频道对同时并发
+        max_concurrent_tasks = 20  # 超激进配置：单任务内20个频道对同时并发（从10提升）
         
         if len(clone_tasks) > max_concurrent_tasks:
             logging.warning(f"⚠️ 任务数量({len(clone_tasks)})超过最大并发数({max_concurrent_tasks})，将分批执行")
@@ -5954,7 +5978,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         for i, sub_task in enumerate(clone_tasks):
             if i >= max_concurrent_tasks:
                 # 超出并发限制的任务延迟启动
-                delay = (i // max_concurrent_tasks) * 5  # 每批延迟5秒
+                delay = (i // max_concurrent_tasks) * 2  # 每批延迟2秒（从5秒大幅降低）
                 logging.info(f"⏱️ 子任务 {i+1} 将在 {delay} 秒后启动（超出并发限制）")
                 print(f"[性能优化] 子任务 {i+1} 延迟启动: {delay}秒")
             
@@ -5972,8 +5996,8 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                         logging.info("所有子任务已完成，停止定期状态更新")
                         break
                     
-                    # 每1秒强制更新一次状态（提高更新频率）
-                    await asyncio.sleep(1.0)
+                    # 每0.5秒强制更新一次状态（进一步提高更新频率）
+                    await asyncio.sleep(0.5)
                     
                     # 强制更新所有任务的进度显示
                     try:
@@ -6017,7 +6041,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     break
                 
                 # 等待任务完成，但设置超时以便定期检查取消状态
-                done, pending = await asyncio.wait(pending_tasks, timeout=2.0, return_when=asyncio.FIRST_COMPLETED)
+                done, pending = await asyncio.wait(pending_tasks, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)  # 从2.0秒降低到1.0秒，提高响应速度
                 
                 # 收集已完成的任务结果
                 for task_done in done:

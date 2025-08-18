@@ -409,7 +409,7 @@ class OptimizationManager:
     
     def __init__(self):
         self.cache_manager = SmartCache(max_size=5000)
-        self.connection_pool = TelegramConnectionPool(max_connections=3)
+        self.connection_pool = TelegramConnectionPool(max_connections=5)  # 从3改为5
         self.memory_manager = MemoryManager()
         
         logging.info("优化管理器初始化完成")

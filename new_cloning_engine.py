@@ -241,39 +241,66 @@ class MessageDeduplicator:
 class RobustCloningEngine:
     """鲁棒的搬运引擎"""
     
-    def __init__(self, client: Client, performance_mode="aggressive", flood_wait_manager=None):
+    def __init__(self, client: Client, source_entity=None, target_entity=None, performance_mode="balanced", flood_wait_manager=None, silent_mode=True):
         self.client = client
+        self.source_entity = source_entity
+        self.target_entity = target_entity
         self.deduplicator = MessageDeduplicator()
         self.processed_message_ids: Dict[str, Set[int]] = {}  # 记录已处理的消息ID
         self.performance_mode = performance_mode
+        self.silent_mode = silent_mode
+        self.batch_progress_enabled = not silent_mode
         
         # 🔧 新增：统一的FloodWait管理器
         self.flood_wait_manager = flood_wait_manager
         
-        # 根据性能模式设置参数 - 优化版本
-        if performance_mode == "conservative":
-            self.batch_size_range = (50, 100)   # 进一步减少批次大小（从100-200减少到50-100）
-            self.batch_delay_range = (2.0, 4.0) # 增加延迟范围（从1.0-2.0增加到2.0-4.0）
-            self.media_group_delay = 3.0         # 增加媒体组延迟（从1.0增加到3.0）
-            self.message_delay_media = 1.5       # 增加媒体消息延迟（从0.6增加到1.5）
-            self.message_delay_text = 1.0        # 增加文本消息延迟（从0.4增加到1.0）
-            self.save_frequency = 20             # 更频繁保存（从30减少到20）
-            self.log_frequency = 5               # 更频繁日志（从8减少到5）
-        elif performance_mode == "balanced":
-            self.batch_size_range = (200, 400)  # 平衡性能和内存
-            self.batch_delay_range = (0.3, 1.0)
-            self.media_group_delay = 0.5
-            self.message_delay_text = 0.15
-            self.save_frequency = 50
-            self.log_frequency = 20
-        else:  # aggressive
-            self.batch_size_range = (300, 600)  # 限制最大批次，防止内存溢出
-            self.batch_delay_range = (0.1, 0.2)
-            self.media_group_delay = 0.2
-            self.message_delay_media = 0.15
-            self.message_delay_text = 0.08
+        # 根据静默模式和性能模式设置参数
+        if silent_mode:
+            # 静默模式下使用更大的批次以提高效率
+            if performance_mode == "balanced":
+                self.batch_size_range = (20, 50)
+                self.batch_delay_range = (0.1, 0.3)
+            else:
+                self.batch_size_range = (10, 30)
+                self.batch_delay_range = (0.1, 0.3)
+            self.media_group_delay = 0.1
+            self.message_delay_media = 0.05
+            self.message_delay_text = 0.05
             self.save_frequency = 100
-            self.log_frequency = 40
+            self.log_frequency = 50
+        else:
+            # 正常模式保持原有设置
+            if performance_mode == "ultra_conservative":
+                self.batch_size_range = (20, 40)    # 极小批次大小，确保24小时稳定运行
+                self.batch_delay_range = (5.0, 8.0) # 极长延迟，最大化稳定性
+                self.media_group_delay = 5.0         # 媒体组超长延迟
+                self.message_delay_media = 3.0       # 媒体消息超长延迟
+                self.message_delay_text = 2.0        # 文本消息超长延迟
+                self.save_frequency = 10             # 最频繁保存
+                self.log_frequency = 3               # 最频繁日志
+            elif performance_mode == "conservative":
+                self.batch_size_range = (50, 100)   # 进一步减少批次大小（从100-200减少到50-100）
+                self.batch_delay_range = (2.0, 4.0) # 增加延迟范围（从1.0-2.0增加到2.0-4.0）
+                self.media_group_delay = 3.0         # 增加媒体组延迟（从1.0增加到3.0）
+                self.message_delay_media = 1.5       # 增加媒体消息延迟（从0.6增加到1.5）
+                self.message_delay_text = 1.0        # 增加文本消息延迟（从0.4增加到1.0）
+                self.save_frequency = 20             # 更频繁保存（从30减少到20）
+                self.log_frequency = 5               # 更频繁日志（从8减少到5）
+            elif performance_mode == "balanced":
+                self.batch_size_range = (200, 400)  # 平衡性能和内存
+                self.batch_delay_range = (0.3, 1.0)
+                self.media_group_delay = 0.5
+                self.message_delay_text = 0.15
+                self.save_frequency = 50
+                self.log_frequency = 20
+            else:  # aggressive
+                self.batch_size_range = (300, 600)  # 限制最大批次，防止内存溢出
+                self.batch_delay_range = (0.1, 0.2)
+                self.media_group_delay = 0.2
+                self.message_delay_media = 0.15
+                self.message_delay_text = 0.08
+                self.save_frequency = 100
+                self.log_frequency = 40
         
         # 支持强制频繁更新模式
         self.force_frequent_updates = False
