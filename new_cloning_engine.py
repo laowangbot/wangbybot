@@ -453,94 +453,32 @@ class RobustCloningEngine:
                         # 使用性能模式配置的媒体组延迟
                         await asyncio.sleep(self.media_group_delay)
                     
-                    # 处理单独消息
-                    for message in standalone_messages:
-                        # 在处理每条消息前检查取消状态
-                        if cancellation_check and cancellation_check():
-                            logging.info(f"搬运任务 {task_id} 在消息处理中被取消")
-                            return stats
-                        
-                        # 再次检查消息有效性
-                        if not hasattr(message, 'id') or message.id is None:
-                            stats["invalid_messages"] += 1
-                            continue
-                        
-                        # 检查消息是否有聊天信息
-                        if not hasattr(message, 'chat') or message.chat is None:
-                            stats["invalid_messages"] += 1
-                            continue
-                        
-                        stats["total_processed"] += 1
-                        
-                        # 检查是否已处理过
-                        if self._is_message_processed(task_key, message.id):
-                            stats["already_processed"] += 1
-                            logging.debug(f"跳过已处理消息: {message.id}")
-                            continue
-                        
-                        # 检查消息是否应该被过滤
-                        if self._should_filter_message(message, config):
-                            stats["filtered_messages"] += 1
-                            logging.debug(f"过滤消息 {message.id}: 匹配过滤规则")
-                            continue
-                        
-                        # 处理消息内容
-                        try:
-                            processed_text, reply_markup = self._process_message_content(message, config)
+                    # 处理单独消息 - 使用批量处理
+                    if standalone_messages:
+                        # 将消息分成小批次处理
+                        batch_size = 10  # 每批处理10条消息
+                        for i in range(0, len(standalone_messages), batch_size):
+                            batch = standalone_messages[i:i + batch_size]
                             
-                            # 创建消息指纹
-                            fingerprint = self.deduplicator.create_fingerprint(message, processed_text)
-                            if not fingerprint:
-                                logging.debug(f"跳过消息 {message.id}: 无法创建指纹")
-                                stats["errors"] += 1
-                                continue
+                            # 检查取消状态
+                            if cancellation_check and cancellation_check():
+                                logging.info(f"搬运任务 {task_id} 在批量处理中被取消")
+                                return stats
                             
-                            # 检查重复
-                            if self.deduplicator.is_duplicate(message.chat.id, target_chat_id, fingerprint):
-                                stats["duplicates_skipped"] += 1
-                                self._mark_message_processed(task_key, message.id)
-                                logging.debug(f"跳过重复消息 {message.id}")
-                                continue
-                            
-                            # 发送消息
-                            success = await self._send_message_safe(
-                                message, target_chat_id, processed_text, reply_markup
+                            # 批量处理这一批消息
+                            await self._process_messages_batch(
+                                batch, target_chat_id, config, stats, task_key
                             )
                             
-                            if success:
-                                # 标记为已处理并添加指纹
-                                self._mark_message_processed(task_key, message.id)
-                                self.deduplicator.add_fingerprint(message.chat.id, target_chat_id, fingerprint)
-                                stats["successfully_cloned"] += 1
-                                logging.debug(f"✅ 成功搬运消息 {message.id} (统计计数: {stats['successfully_cloned']})")
-                            else:
-                                stats["errors"] += 1
-                                logging.warning(f"❌ 消息 {message.id} 发送失败 (错误计数: {stats['errors']})")
-                            
-                        except Exception as e:
-                            logging.error(f"❌ 处理消息 {message.id} 时出错: {e}")
-                            stats["errors"] += 1
-                        
-                        # 简化进度回调触发条件，确保每次处理都能触发
-                        if progress_callback:
-                            try:
-                                # 强制频繁更新模式下，每次处理都触发回调
-                                if self.force_frequent_updates:
-                                    logging.debug(f"🔍 强制频繁更新: 触发进度回调 (处理:{stats['total_processed']}, 成功:{stats['successfully_cloned']})")
+                            # 批次间进度回调
+                            if progress_callback:
+                                try:
                                     await progress_callback(stats)
-                                else:
-                                    # 正常模式下，根据配置频率触发
-                                    if stats["total_processed"] % self.log_frequency == 0:
-                                        logging.info(f"🔍 统计更新: 处理{stats['total_processed']}, 成功{stats['successfully_cloned']}, 错误{stats['errors']}")
-                                        await progress_callback(stats)
-                            except Exception as e:
-                                logging.debug(f"进度回调失败: {e}")
-                        
-                        # 使用性能模式配置的消息延迟
-                        if message.photo or message.video or message.document:
-                            await asyncio.sleep(self.message_delay_media)
-                        else:
-                            await asyncio.sleep(self.message_delay_text)
+                                except Exception as e:
+                                    logging.debug(f"批量处理进度回调失败: {e}")
+                            
+                            # 批次间短暂延迟
+                            await asyncio.sleep(0.05)
                 
                 except Exception as e:
                     logging.error(f"获取消息批次失败 {current_id}-{batch_end}: {e}")
@@ -1195,6 +1133,110 @@ class RobustCloningEngine:
                     logging.error(f"❌ 消息 {original_message.id} FLOOD_WAIT 格式解析失败: {e}")
             else:
                 logging.error(f"❌ 发送消息 {original_message.id} 失败: {e}")
+            return False
+    
+    async def _process_messages_batch(self, messages: List[Message], target_chat_id: str, config: dict, stats: dict, task_key: str) -> None:
+        """批量处理消息，提升处理效率"""
+        if not messages:
+            return
+        
+        # 第一步：批量预处理和验证
+        valid_messages = []
+        for message in messages:
+            # 批量有效性检查
+            if not hasattr(message, 'id') or message.id is None:
+                stats["invalid_messages"] += 1
+                continue
+            if not hasattr(message, 'chat') or message.chat is None:
+                stats["invalid_messages"] += 1
+                continue
+            
+            stats["total_processed"] += 1
+            
+            # 批量已处理检查
+            if self._is_message_processed(task_key, message.id):
+                stats["already_processed"] += 1
+                continue
+            
+            # 批量过滤检查
+            if self._should_filter_message(message, config):
+                stats["filtered_messages"] += 1
+                continue
+                
+            valid_messages.append(message)
+        
+        # 第二步：批量内容处理
+        processed_messages = []
+        for message in valid_messages:
+            try:
+                processed_text, reply_markup = self._process_message_content(message, config)
+                
+                # 创建消息指纹
+                fingerprint = self.deduplicator.create_fingerprint(message, processed_text)
+                if not fingerprint:
+                    stats["errors"] += 1
+                    continue
+                
+                # 检查重复
+                if self.deduplicator.is_duplicate(message.chat.id, target_chat_id, fingerprint):
+                    stats["duplicates_skipped"] += 1
+                    self._mark_message_processed(task_key, message.id)
+                    continue
+                
+                processed_messages.append({
+                    'message': message,
+                    'processed_text': processed_text,
+                    'reply_markup': reply_markup,
+                    'fingerprint': fingerprint
+                })
+            except Exception as e:
+                logging.error(f"❌ 预处理消息 {message.id} 时出错: {e}")
+                stats["errors"] += 1
+        
+        # 第三步：批量发送（使用并发）
+        if processed_messages:
+            # 创建发送任务
+            send_tasks = []
+            for item in processed_messages:
+                task = self._send_message_batch_item(
+                    item['message'], target_chat_id, 
+                    item['processed_text'], item['reply_markup'],
+                    item['fingerprint'], stats, task_key
+                )
+                send_tasks.append(task)
+            
+            # 并发执行发送任务（限制并发数）
+            batch_size = min(5, len(send_tasks))  # 最多5个并发
+            for i in range(0, len(send_tasks), batch_size):
+                batch = send_tasks[i:i + batch_size]
+                await asyncio.gather(*batch, return_exceptions=True)
+                
+                # 批次间短暂延迟，避免过于频繁
+                if i + batch_size < len(send_tasks):
+                    await asyncio.sleep(0.1)
+    
+    async def _send_message_batch_item(self, message: Message, target_chat_id: str, 
+                                     processed_text: str, reply_markup, fingerprint, 
+                                     stats: dict, task_key: str) -> bool:
+        """批量发送中的单个消息处理"""
+        try:
+            success = await self._send_message_safe(
+                message, target_chat_id, processed_text, reply_markup
+            )
+            
+            if success:
+                self._mark_message_processed(task_key, message.id)
+                self.deduplicator.add_fingerprint(message.chat.id, target_chat_id, fingerprint)
+                stats["successfully_cloned"] += 1
+                logging.debug(f"✅ 批量发送成功: {message.id}")
+            else:
+                stats["errors"] += 1
+                logging.warning(f"❌ 批量发送失败: {message.id}")
+            
+            return success
+        except Exception as e:
+            logging.error(f"❌ 批量发送消息 {message.id} 时出错: {e}")
+            stats["errors"] += 1
             return False
 
 # 使用示例

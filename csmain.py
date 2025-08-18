@@ -145,13 +145,31 @@ class FloodWaitManager:
             'copy_message': 0.3,    # 复制消息间隔0.3秒
             'send_media_group': 0.5, # 发送媒体组间隔0.5秒
         }
+        
+        # 启动时清理所有可能的遗留用户级限制数据
+        self._cleanup_legacy_user_restrictions()
+    
+    def _cleanup_legacy_user_restrictions(self):
+        """清理遗留的用户级限制数据"""
+        keys_to_remove = []
+        for key in list(self.flood_wait_times.keys()):
+            if '_' in key:  # 包含用户ID的键
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            del self.flood_wait_times[key]
+            logging.info(f"清理遗留用户级限制: {key}")
+        
+        if keys_to_remove:
+            logging.info(f"FloodWaitManager初始化完成，已清理 {len(keys_to_remove)} 个遗留用户级限制")
     
     async def wait_if_needed(self, operation_type, user_id=None):
-        """检查是否需要等待，如果需要则等待（已移除用户限制）"""
+        """检查是否需要等待，如果需要则等待（完全移除用户级限制）"""
         current_time = time.time()
-        key = f"{operation_type}_{user_id}" if user_id else operation_type
+        # 完全移除用户级限制，只使用operation_type作为key
+        key = operation_type
         
-        # 只保留最基本的操作间隔控制，移除所有用户级限制
+        # 只保留最基本的操作间隔控制，完全移除所有用户级限制
         if key in self.last_operation_time:
             last_time = self.last_operation_time[key]
             delay_needed = self.operation_delays.get(operation_type, 1)
@@ -163,12 +181,12 @@ class FloodWaitManager:
                 logging.debug(f"操作 {operation_type} 间隔控制，等待 {sleep_time:.3f} 秒")
                 await asyncio.sleep(sleep_time)
         
-        # 更新最后操作时间
+        # 更新最后操作时间（只记录全局操作时间）
         self.last_operation_time[key] = time.time()
     
     def set_flood_wait(self, operation_type, wait_time, user_id=None):
-        """设置FloodWait等待时间，但限制最大值（已修复）"""
-        # 限制最大等待时间为60秒，防止异常的长等待时间
+        """设置FloodWait等待时间（已移除用户限制记录）"""
+        # 统一最大等待时间为60秒，与搬运引擎保持一致
         MAX_WAIT_TIME = 60
         safe_wait_time = min(wait_time, MAX_WAIT_TIME)
         
@@ -181,7 +199,6 @@ class FloodWaitManager:
             # 记录原始时间和调整后的时间
             if safe_wait_time != wait_time:
                 logging.warning(f"⚠️ 检测到异常的FloodWait时间: {wait_time}秒，已自动限制为{safe_wait_time}秒")
-                logging.warning(f"⚠️ 操作类型: {operation_type}，原始限制: {wait_time}秒，安全限制: {safe_wait_time}秒")
             
             # 格式化等待时间
             if safe_wait_time >= 60:
@@ -189,7 +206,7 @@ class FloodWaitManager:
             else:
                 time_str = f"{safe_wait_time}秒"
             
-            logging.warning(f"全局操作 {operation_type} 遇到FloodWait限制，需要等待 {time_str} (安全限制: {safe_wait_time}秒)")
+            logging.warning(f"全局操作 {operation_type} 遇到FloodWait限制，需要等待 {time_str} ({safe_wait_time}秒)")
         else:
             # 用户级限制只记录日志，不阻止操作
             logging.info(f"用户 {user_id} 的操作 {operation_type} 遇到限制，但已移除阻止机制")
@@ -262,6 +279,16 @@ class FloodWaitManager:
         
         return user_status
     
+    def is_bot_limited(self):
+        """检查机器人是否被限制（影响所有用户）"""
+        current_time = time.time()
+        for operation_type, wait_until in self.flood_wait_times.items():
+            if wait_until > current_time:
+                remaining = wait_until - current_time
+                if remaining > 60:  # 超过1分钟的限制
+                    return True, operation_type, remaining
+        return False, None, 0
+    
     def clear_expired_flood_wait(self):
         """清理过期的FloodWait记录"""
         current_time = time.time()
@@ -276,6 +303,41 @@ class FloodWaitManager:
             logging.debug(f"清理过期的FloodWait记录: {key}")
         
         return len(expired_keys)
+    
+    def clear_all_flood_wait(self):
+        """清除所有FloodWait限制（紧急情况下使用）"""
+        cleared_count = len(self.flood_wait_times)
+        self.flood_wait_times.clear()
+        self.last_operation_time.clear()
+        logging.warning(f"⚠️ 已清除所有FloodWait限制，共 {cleared_count} 个")
+        return cleared_count
+    
+    def clear_user_flood_wait(self, user_id):
+        """清除特定用户的FloodWait限制"""
+        cleared_count = 0
+        keys_to_remove = []
+        
+        for key in list(self.flood_wait_times.keys()):
+            if f"_{user_id}" in key or key == f"edit_message_{user_id}" or key == f"send_message_{user_id}":
+                keys_to_remove.append(key)
+                cleared_count += 1
+        
+        for key in keys_to_remove:
+            del self.flood_wait_times[key]
+        
+        # 同时清除用户的操作时间记录
+        user_keys_to_remove = []
+        for key in list(self.last_operation_time.keys()):
+            if f"_{user_id}" in key:
+                user_keys_to_remove.append(key)
+        
+        for key in user_keys_to_remove:
+            del self.last_operation_time[key]
+        
+        if cleared_count > 0:
+            logging.info(f"已清除用户 {user_id} 的 {cleared_count} 个FloodWait限制")
+        
+        return cleared_count
     
     def auto_recovery_check(self):
         """自动恢复检查 - 检测并修复异常的FloodWait限制"""
@@ -780,10 +842,15 @@ async def cooperative_sleep(task_obj: dict, seconds: int):
 def save_configs():
     """将用户配置保存到文件和Firebase"""
     # 1. 保存到本地文件（作为备份）
-    config_file = f"user_configs_{bot_config['bot_id']}.json"
-    with open(config_file, "w", encoding='utf-8') as f:
-        json.dump(user_configs, f, ensure_ascii=False, indent=4)
-    logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到本地文件 {config_file}")
+    config_file = f"data/user_configs_{bot_config['bot_id']}.json"
+    try:
+        # 确保data目录存在
+        os.makedirs("data", exist_ok=True)
+        with open(config_file, "w", encoding='utf-8') as f:
+            json.dump(user_configs, f, ensure_ascii=False, indent=4)
+        logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到本地文件 {config_file}")
+    except Exception as e:
+        logging.error(f"[{bot_config['bot_id']}] 保存本地配置文件失败: {e}")
     
     # 2. 尝试保存到Firebase
     try:
@@ -810,20 +877,52 @@ def load_configs():
     except Exception as e:
         logging.warning(f"[{bot_config['bot_id']}] 从Firebase加载失败: {e}")
     
-    # 2. 如果Firebase失败，从本地文件加载
-    config_file = f"user_configs_{bot_config['bot_id']}.json"
+    # 2. 如果Firebase失败，从本地文件加载（修复路径问题）
+    config_file = f"data/user_configs_{bot_config['bot_id']}.json"
     if os.path.exists(config_file):
-        with open(config_file, "r", encoding="utf-8") as f:
-            user_configs = json.load(f)
-        logging.info(f"[{bot_config['bot_id']}] 用户配置已从本地文件 {config_file} 载入，共 {len(user_configs)} 个用户")
+        try:
+            with open(config_file, "r", encoding='utf-8') as f:
+                user_configs = json.load(f)
+            logging.info(f"[{bot_config['bot_id']}] 用户配置已从本地文件 {config_file} 载入，共 {len(user_configs)} 个用户")
+        except Exception as e:
+            logging.error(f"[{bot_config['bot_id']}] 读取本地配置文件失败: {e}")
+            user_configs = {}
     else:
         logging.info(f"[{bot_config['bot_id']}] 配置文件 {config_file} 不存在，将创建新配置")
         user_configs = {}
 
+def ensure_user_config_exists(user_id):
+    """确保用户配置存在，如果不存在则创建默认配置"""
+    user_id_str = str(user_id)
+    if user_id_str not in user_configs:
+        user_configs[user_id_str] = {
+            "channel_pairs": [],
+            "remove_links": False,
+            "remove_hashtags": False,
+            "remove_usernames": False,
+            "filter_photo": False,
+            "filter_video": False,
+            "filter_buttons": False,
+            "realtime_listen": False,
+            "tail_text": "",
+            "tail_position": "none",
+            "buttons": [],
+            "keywords": [],
+            "replacements": [],
+            "file_extensions": [],
+            "filter_buttons_mode": "whitelist",
+            "button_domain_whitelist": []
+        }
+        logging.info(f"[{bot_config['bot_id']}] 为新用户 {user_id} 创建默认配置")
+        # 保存配置
+        save_configs()
+
 def save_user_states():
     """将用户状态保存到文件"""
     try:
-        config_file = f"user_states_{bot_config['bot_id']}.json"
+        config_file = f"data/user_states_{bot_config['bot_id']}.json"
+        # 确保data目录存在
+        os.makedirs("data", exist_ok=True)
         with open(config_file, "w", encoding='utf-8') as f:
             json.dump(user_states, f, ensure_ascii=False, indent=4)
         logging.info(f"[{bot_config['bot_id']}] 用户状态已保存到 {config_file}。")
@@ -834,7 +933,7 @@ def load_user_states():
     """从文件载入用户状态"""
     global user_states
     try:
-        config_file = f"user_states_{bot_config['bot_id']}.json"
+        config_file = f"data/user_states_{bot_config['bot_id']}.json"
         if os.path.exists(config_file):
             with open(config_file, "r", encoding="utf-8") as f:
                 user_states = json.load(f)
@@ -848,19 +947,30 @@ def load_user_states():
 
 def save_history():
     """将历史记录保存到文件"""
-    config_file = f"user_history_{bot_config['bot_id']}.json"
-    with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(user_history, f, ensure_ascii=False, indent=4)
-    logging.info(f"[{bot_config['bot_id']}] 历史记录已保存到 {config_file}。")
+    config_file = f"data/user_history_{bot_config['bot_id']}.json"
+    try:
+        # 确保data目录存在
+        os.makedirs("data", exist_ok=True)
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(user_history, f, ensure_ascii=False, indent=4)
+        logging.info(f"[{bot_config['bot_id']}] 历史记录已保存到 {config_file}。")
+    except Exception as e:
+        logging.error(f"[{bot_config['bot_id']}] 保存历史记录失败: {e}")
 
 def load_history():
     """从文件载入历史记录"""
     global user_history
-    config_file = f"user_history_{bot_config['bot_id']}.json"
+    config_file = f"data/user_history_{bot_config['bot_id']}.json"
     if os.path.exists(config_file):
-        with open(config_file, "r", encoding="utf-8") as f:
-            user_history = json.load(f)
-        logging.info(f"[{bot_config['bot_id']}] 历史记录已载入。")
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                user_history = json.load(f)
+            logging.info(f"[{bot_config['bot_id']}] 历史记录已载入。")
+        except Exception as e:
+            logging.error(f"[{bot_config['bot_id']}] 读取历史记录失败: {e}")
+            user_history = []
+    else:
+        user_history = []
 
 # ==================== 按钮设置 ====================
 def get_main_menu_buttons(user_id):
@@ -1108,8 +1218,11 @@ def remove_task(user_id, task_id):
 async def safe_edit_or_reply(message, text, reply_markup=None, user_id=None):
     """安全的编辑或回复消息，包含FloodWait保护"""
     try:
-        # 检查是否需要等待（已移除用户级限制）
-        await flood_wait_manager.wait_if_needed('edit_message')
+        # 检查是否需要等待（传递用户ID，支持用户级限制）
+        if user_id:
+            await flood_wait_manager.wait_if_needed('edit_message', user_id)
+        else:
+            await flood_wait_manager.wait_if_needed('edit_message')
         
         # 尝试编辑消息
         await message.edit_text(text, reply_markup=reply_markup)
@@ -1122,13 +1235,16 @@ async def safe_edit_or_reply(message, text, reply_markup=None, user_id=None):
         # 只记录全局限制，不阻止用户操作
         flood_wait_manager.set_flood_wait('edit_message', wait_time)
         
-        logging.info(f"全局操作 edit_message 遇到FloodWait限制，需要等待 {wait_time} 秒")
+        logging.warning(f"⚠️ 机器人账号遇到FloodWait限制: {wait_time}秒，影响所有用户")
         
         # 如果等待时间过长（超过5分钟），直接回复新消息
         if wait_time > 300:
-            logging.info(f"等待时间过长({wait_time}秒)，改为发送新消息")
+            logging.warning(f"⚠️ 等待时间过长({wait_time}秒)，改为发送新消息")
             try:
-                await flood_wait_manager.wait_if_needed('send_message')
+                if user_id:
+                    await flood_wait_manager.wait_if_needed('send_message', user_id)
+                else:
+                    await flood_wait_manager.wait_if_needed('send_message')
                 await message.reply_text(text, reply_markup=reply_markup)
                 return True
             except Exception as reply_e:
@@ -1161,7 +1277,10 @@ async def safe_edit_or_reply(message, text, reply_markup=None, user_id=None):
             # 消息无法编辑，改为发送新消息
             logging.info(f"消息无法编辑，改为发送新消息: {e}")
             try:
-                await flood_wait_manager.wait_if_needed('send_message')
+                if user_id:
+                    await flood_wait_manager.wait_if_needed('send_message', user_id)
+                else:
+                    await flood_wait_manager.wait_if_needed('send_message')
                 await message.reply_text(text, reply_markup=reply_markup)
                 return True
             except Exception as reply_e:
@@ -1171,7 +1290,10 @@ async def safe_edit_or_reply(message, text, reply_markup=None, user_id=None):
             logging.error(f"BadRequest错误: {e}")
             # 尝试发送新消息
             try:
-                await flood_wait_manager.wait_if_needed('send_message')
+                if user_id:
+                    await flood_wait_manager.wait_if_needed('send_message', user_id)
+                else:
+                    await flood_wait_manager.wait_if_needed('send_message')
                 await message.reply_text(text, reply_markup=reply_markup)
                 return True
             except Exception as reply_e:
@@ -2596,8 +2718,8 @@ async def listen_and_clone(client, message):
                 try:
                     await client.send_media_group(chat_id=pair['target'], media=media_list)
                     if reply_markup:
-                        # 为按钮消息添加占位符文本，避免 MESSAGE_EMPTY 错误
-                        await client.send_message(chat_id=pair['target'], text="📋", reply_markup=reply_markup)
+                        # 使用安全的按钮发送函数，避免 MESSAGE_EMPTY 错误
+                        await safe_send_button_message(client, pair['target'], reply_markup, "媒体组")
                 except Exception as e:
                     logging.error(f"监听搬运媒体组失败: {e}")
             return
@@ -3860,7 +3982,8 @@ async def show_pair_tail_text_menu(message, user_id, pair_id):
         text += "📝 **当前小尾巴**: 未设置\n\n"
     
     text += "💡 **说明**: 文本小尾巴会在搬运的每条消息中添加自定义文字。\n"
-    text += "可以选择添加到消息开头或结尾。\n\n"
+    text += "可以选择添加到消息开头或结尾。\n"
+    text += "💡 **链接支持**: 支持 `[文字](链接)` 和 `文字:链接` 格式。\n\n"
     
     buttons = [
         [InlineKeyboardButton("📝 设置小尾巴文字", callback_data=f"pair_set_tail_text:{pair_id}")],
@@ -4351,6 +4474,11 @@ async def request_pair_tail_text(message, user_id, pair_id):
         f"✍️ **设置文本小尾巴**\n\n"
         f"📂 **频道组**: `{pair['source']}` ➜ `{pair['target']}`\n\n"
         f"💬 请输入要添加的文本小尾巴：\n\n"
+        f"**支持格式：**\n"
+        f"• **纯文本**: 普通文字\n"
+        f"• **链接格式1**: `[文字](链接)` 例如: `[官网](https://example.com)`\n"
+        f"• **链接格式2**: `文字:链接` 例如: `官网:https://example.com`\n"
+        f"• **Telegram格式**: `@用户名` 或 `t.me/频道名`\n\n"
         f"💡 **提示**:\n"
         f"• 支持多行文本\n"
         f"• 可以使用表情符号\n"
@@ -4956,6 +5084,72 @@ def should_filter_message(message, config):
 
     return False
 
+async def safe_send_button_message(client, chat_id, reply_markup, context="媒体组"):
+    """安全发送按钮消息，避免 MESSAGE_EMPTY 错误"""
+    if not reply_markup or not reply_markup.inline_keyboard:
+        logging.warning(f"{context}: 无效的按钮配置，跳过发送")
+        return False
+    
+    # 验证按钮对象的完整性
+    try:
+        # 检查每个按钮是否有效
+        valid_buttons = []
+        for row in reply_markup.inline_keyboard:
+            for button in row:
+                if hasattr(button, 'text') and hasattr(button, 'url'):
+                    if button.text and button.url:
+                        valid_buttons.append(button)
+                    else:
+                        logging.warning(f"{context}: 跳过无效按钮: text='{button.text}', url='{button.url}'")
+        
+        if not valid_buttons:
+            logging.warning(f"{context}: 没有有效的按钮，跳过发送")
+            return False
+            
+        # 创建新的有效按钮对象
+        valid_rows = []
+        current_row = []
+        for button in valid_buttons:
+            current_row.append(button)
+            if len(current_row) == 2:  # 每行最多2个按钮
+                valid_rows.append(current_row)
+                current_row = []
+        if current_row:  # 添加剩余的按钮
+            valid_rows.append(current_row)
+        
+        safe_reply_markup = InlineKeyboardMarkup(valid_rows)
+        logging.info(f"{context}: 验证后有效按钮: {len(valid_buttons)} 个")
+        
+    except Exception as validation_error:
+        logging.error(f"{context}: 按钮验证失败: {validation_error}")
+        return False
+    
+    # 尝试多种文本内容，确保消息不为空
+    button_texts = [
+        f"📋 {context}按钮 ({len(valid_buttons)}个)",
+        f"📋 附加按钮 ({len(valid_buttons)}个)",
+        f"📋 按钮 ({len(valid_buttons)}个)",
+        "📋"
+    ]
+    
+    for text in button_texts:
+        try:
+            await client.send_message(chat_id=chat_id, text=text, reply_markup=safe_reply_markup)
+            logging.info(f"{context}: 按钮发送成功，使用文本: '{text}'")
+            return True
+        except Exception as e:
+            logging.warning(f"{context}: 使用文本 '{text}' 发送失败: {e}")
+            continue
+    
+    # 如果所有文本都失败，尝试发送纯文本消息
+    try:
+        await client.send_message(chat_id=chat_id, text=f"📋 {context}按钮发送失败，请检查配置")
+        logging.warning(f"{context}: 按钮发送完全失败，已发送提示消息")
+        return False
+    except Exception as final_error:
+        logging.error(f"{context}: 发送提示消息也失败: {final_error}")
+        return False
+
 def _simple_process_content(text, config):
     """简化的消息内容处理（回退方案）"""
     processed_text = text
@@ -4978,19 +5172,22 @@ def _simple_process_content(text, config):
     for old_word, new_word in replacement_words.items():
         processed_text = processed_text.replace(old_word, new_word)
     
-    # 添加尾巴文字
+    # 添加尾巴文字（支持HTML链接格式）
     tail_text = config.get("tail_text", "")
     if tail_text:
+        # 处理小尾巴中的链接格式
+        processed_tail = process_tail_text_with_links(tail_text)
+        
         if not processed_text.strip():
             # 如果原始文本为空，直接使用小尾巴文本
-            processed_text = tail_text
+            processed_text = processed_tail
         else:
             # 如果原始文本不为空，按位置添加小尾巴
             tail_position = config.get("tail_position", "end")
             if tail_position == "start":
-                processed_text = tail_text + "\n\n" + processed_text
+                processed_text = processed_tail + "\n\n" + processed_text
             else:  # end
-                processed_text = processed_text + "\n\n" + tail_text
+                processed_text = processed_text + "\n\n" + processed_tail
     
     # 添加自定义按钮
     reply_markup = None
@@ -5014,6 +5211,52 @@ def _simple_process_content(text, config):
             reply_markup = InlineKeyboardMarkup(button_rows)
     
     return processed_text.strip(), reply_markup
+
+
+def process_tail_text_with_links(tail_text):
+    """处理小尾巴文本，支持链接格式"""
+    if not tail_text:
+        return tail_text
+    
+    # 支持多种链接格式
+    # 格式1: [文字](链接)
+    # 格式2: 文字:链接
+    # 格式3: 纯文本（保持原样）
+    
+    # 检查是否包含链接格式
+    if "[" in tail_text and "]" in tail_text and "(" in tail_text and ")" in tail_text:
+        # 格式1: [文字](链接) - 转换为HTML格式
+        import re
+        pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        
+        def replace_link(match):
+            text = match.group(1)
+            url = match.group(2)
+            # 处理URL格式
+            if url.startswith("@"):
+                url = f"t.me/{url[1:]}"
+            elif not url.startswith(("http://", "https://", "t.me/")):
+                url = f"t.me/{url}"
+            return f'<a href="{url}">{text}</a>'
+        
+        processed_text = re.sub(pattern, replace_link, tail_text)
+        return processed_text
+    
+    elif ":" in tail_text and "http" in tail_text:
+        # 格式2: 文字:链接 - 转换为HTML格式
+        parts = tail_text.split(":", 1)
+        if len(parts) == 2:
+            text = parts[0].strip()
+            url = parts[1].strip()
+            # 处理URL格式
+            if url.startswith("@"):
+                url = f"t.me/{url[1:]}"
+            elif not url.startswith(("http://", "https://", "t.me/")):
+                url = f"t.me/{url}"
+            return f'{text}: <a href="{url}">{url}</a>'
+    
+    # 格式3: 纯文本，保持原样
+    return tail_text
 
 
 async def show_manage_file_extensions_menu(message, user_id):
@@ -5129,6 +5372,11 @@ async def request_tail_text(message, user_id):
     await safe_edit_or_reply(message, 
         f"✍️ **设定附加文字（小尾巴）**\n\n"
         f"请回复您想设定的小尾巴内容。\n\n"
+        f"**支持格式：**\n"
+        f"• **纯文本**: 普通文字\n"
+        f"• **链接格式1**: `[文字](链接)` 例如: `[官网](https://example.com)`\n"
+        f"• **链接格式2**: `文字:链接` 例如: `官网:https://example.com`\n"
+        f"• **Telegram格式**: `@用户名` 或 `t.me/频道名`\n\n"
         f"**提示：**\n"
         f"• 若想清空，请回复 `清空`\n"
         f"• 可以包含表情符号和换行\n"
@@ -5477,57 +5725,66 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         async def global_progress_update():
             """全局进度更新函数"""
             nonlocal last_global_update
-            async with update_lock:
-                current_time = time.time()
-                if current_time - last_global_update < 0.3:  # 提高更新频率到0.3秒
-                    return
-                last_global_update = current_time
-                
-                elapsed = current_time - start_time
-                
-                # 计算总体统计
-                total_cloned = sum(progress["cloned"] for progress in task_progress.values())
-                total_processed = sum(progress["processed"] for progress in task_progress.values())
-                total_errors = sum(progress["errors"] for progress in task_progress.values())
-                speed = total_cloned / max(elapsed, 1)
-                
-                # 构建简化的任务状态显示（文本模式，更快渲染）
-                concurrent_status = f"**并发任务状态** ({len(clone_tasks)} 个任务):\n"
-                for j, sub_task_item in enumerate(clone_tasks):
-                    sub_source = sub_task_item['pair']['source'][:12] + "..." if len(sub_task_item['pair']['source']) > 12 else sub_task_item['pair']['source']
-                    sub_target = sub_task_item['pair']['target'][:12] + "..." if len(sub_task_item['pair']['target']) > 12 else sub_task_item['pair']['target']
+            try:
+                async with update_lock:
+                    current_time = time.time()
+                    if current_time - last_global_update < 1.0:  # 从0.3秒调整到1秒，减少更新频率
+                        return
+                    last_global_update = current_time
                     
-                    progress_info = task_progress[j]
-                    status = progress_info["status"]
-                    progress_pct = progress_info["progress"]
-                    cloned = progress_info["cloned"]
-                    processed = progress_info["processed"]
-                    errors = progress_info["errors"]
+                    elapsed = current_time - start_time
                     
-                    if status == "进行中":
-                        concurrent_status += f"🔄 T{j+1}: {sub_source}→{sub_target} | {progress_pct:.0f}% | ✅{cloned} ❌{errors}\n"
-                    elif status == "完成":
-                        concurrent_status += f"✅ T{j+1}: {sub_source}→{sub_target} | 完成 | ✅{cloned} ❌{errors}\n"
-                    elif status == "等待中":
-                        concurrent_status += f"⏸️ T{j+1}: {sub_source}→{sub_target} | 等待启动\n"
-                    else:
-                        concurrent_status += f"❌ T{j+1}: {sub_source}→{sub_target} | 错误 | ❌{errors}\n"
-                
-                progress_text = (
-                    f"🚀 **老湿姬2.0** `{task_id_short}` **并发进行中**\n\n"
-                    f"📈 **总体统计**: ✅{total_cloned} | 🔄{total_processed} | ❌{total_errors} | ⚡{speed:.1f}/s | ⏱️{elapsed:.1f}s\n\n"
-                    f"{concurrent_status}\n"
-                    f"🔧 **并发模式**: 多任务同时执行，提升效率"
-                )
-                
-                try:
-                    await safe_edit_or_reply(message, progress_text,
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("🛑 停止任务", callback_data=f"cancel_task:{original_task['task_id']}")
-                        ]])
+                    # 增加状态检查
+                    if not any(progress["status"] == "进行中" for progress in task_progress.values()):
+                        logging.info("所有子任务已完成，停止进度更新")
+                        return
+                    
+                    # 计算总体统计
+                    total_cloned = sum(progress["cloned"] for progress in task_progress.values())
+                    total_processed = sum(progress["processed"] for progress in task_progress.values())
+                    total_errors = sum(progress["errors"] for progress in task_progress.values())
+                    speed = total_cloned / max(elapsed, 1)
+                    
+                    # 构建简化的任务状态显示（文本模式，更快渲染）
+                    concurrent_status = f"**并发任务状态** ({len(clone_tasks)} 个任务):\n"
+                    for j, sub_task_item in enumerate(clone_tasks):
+                        sub_source = sub_task_item['pair']['source'][:12] + "..." if len(sub_task_item['pair']['source']) > 12 else sub_task_item['pair']['source']
+                        sub_target = sub_task_item['pair']['target'][:12] + "..." if len(sub_task_item['pair']['target']) > 12 else sub_task_item['pair']['target']
+                        
+                        progress_info = task_progress[j]
+                        status = progress_info["status"]
+                        progress_pct = progress_info["progress"]
+                        cloned = progress_info["cloned"]
+                        processed = progress_info["processed"]
+                        errors = progress_info["errors"]
+                        
+                        if status == "进行中":
+                            concurrent_status += f"🔄 T{j+1}: {sub_source}→{sub_target} | {progress_pct:.0f}% | ✅{cloned} ❌{errors}\n"
+                        elif status == "完成":
+                            concurrent_status += f"✅ T{j+1}: {sub_source}→{sub_target} | 完成 | ✅{cloned} ❌{errors}\n"
+                        elif status == "等待中":
+                            concurrent_status += f"⏸️ T{j+1}: {sub_source}→{sub_target} | 等待启动\n"
+                        else:
+                            concurrent_status += f"❌ T{j+1}: {sub_source}→{sub_target} | 错误 | ❌{errors}\n"
+                    
+                    progress_text = (
+                        f"🚀 **老湿姬2.0** `{task_id_short}` **并发进行中**\n\n"
+                        f"📈 **总体统计**: ✅{total_cloned} | 🔄{total_processed} | ❌{total_errors} | ⚡{speed:.1f}/s | ⏱️{elapsed:.1f}s\n\n"
+                        f"{concurrent_status}\n"
+                        f"🔧 **并发模式**: 多任务同时执行，提升效率"
                     )
-                except Exception as e:
-                    logging.debug(f"更新进度失败: {e}")
+                    
+                    try:
+                        await safe_edit_or_reply(message, progress_text,
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("🛑 停止任务", callback_data=f"cancel_task:{original_task['task_id']}")
+                            ]])
+                        )
+                    except Exception as e:
+                        logging.debug(f"更新进度失败: {e}")
+            except Exception as e:
+                logging.error(f"进度更新异常: {e}")
+                # 确保异常不会阻止后续更新
         
         # 创建子任务协程
         async def process_subtask(i, sub_task):
@@ -5536,6 +5793,9 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
             target = sub_task['pair']['target']
             start_id = sub_task['start_id']
             end_id = sub_task['end_id']
+            
+            # ✅ 修复：获取该频道组的专用配置
+            effective_config = get_effective_config_for_realtime(user_id, source, target)
             
             # 性能优化：智能错峰启动，避免资源竞争
             if i >= max_concurrent_tasks:
@@ -5558,19 +5818,32 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
             
             # 子任务进度回调 - 优化版本
             async def subtask_progress_callback(stats):
-                if stats.get("requested_range", 1) > 0:
-                    progress_pct = (stats.get("total_processed", 0) / stats.get("requested_range", 1)) * 100
-                    task_progress[i]["progress"] = min(progress_pct, 100)
-                    task_progress[i]["cloned"] = stats.get("successfully_cloned", 0)
-                    task_progress[i]["processed"] = stats.get("total_processed", 0)
-                    task_progress[i]["errors"] = stats.get("errors", 0)
-                    task_progress[i]["current_offset_id"] = stats.get("current_offset_id", start_id)
-                    
-                    # 立即触发全局进度更新，不等待
-                    try:
-                        await global_progress_update()
-                    except Exception as e:
-                        logging.debug(f"进度更新失败: {e}")
+                try:
+                    if stats.get("requested_range", 1) > 0:
+                        progress_pct = (stats.get("total_processed", 0) / stats.get("requested_range", 1)) * 100
+                        task_progress[i]["progress"] = min(progress_pct, 100)
+                        task_progress[i]["cloned"] = stats.get("successfully_cloned", 0)
+                        task_progress[i]["processed"] = stats.get("total_processed", 0)
+                        task_progress[i]["errors"] = stats.get("errors", 0)
+                        task_progress[i]["current_offset_id"] = stats.get("current_offset_id", start_id)
+                        
+                        # 记录最后更新时间
+                        task_progress[i]["last_update_time"] = time.time()
+                        
+                        # 记录详细进度日志
+                        logging.info(f"子任务 {i+1} 进度更新: {progress_pct:.1f}% | 已搬运:{stats.get('successfully_cloned', 0)} | 已处理:{stats.get('total_processed', 0)}")
+                        
+                        # 立即触发全局进度更新，不等待
+                        try:
+                            await global_progress_update()
+                            logging.debug(f"子任务 {i+1} 全局进度更新成功")
+                        except Exception as e:
+                            logging.warning(f"子任务 {i+1} 全局进度更新失败: {e}")
+                    else:
+                        logging.warning(f"子任务 {i+1} 收到无效的进度统计: {stats}")
+                        
+                except Exception as callback_error:
+                    logging.error(f"子任务 {i+1} 进度回调异常: {callback_error}")
             
             # 检查取消函数 - 使用主任务ID检查取消状态
             def check_cancellation():
@@ -5587,7 +5860,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     restore_progress = original_task["progress"].get(str(i), {})
                 
                 # 强制设置更频繁的进度更新
-                enhanced_config = config.copy()
+                enhanced_config = effective_config.copy()  # ✅ 使用频道组专用配置
                 enhanced_config["force_frequent_updates"] = True  # 标记强制频繁更新
                 
                 sub_stats = await robust_cloning_engine.clone_messages_robust(
@@ -5595,7 +5868,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     target_chat_id=target,
                     start_id=start_id,
                     end_id=end_id,
-                    config=enhanced_config,
+                    config=enhanced_config,  # ✅ 现在传递的是正确的频道组专用配置
                     progress_callback=subtask_progress_callback,
                     task_id=f"{original_task['task_id']}_sub_{i}",
                     cancellation_check=check_cancellation,
@@ -5618,7 +5891,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         
         # 启动所有子任务并发执行 - 性能优化：限制最大并发数
         # 创建真正的Task对象，而不是协程
-        max_concurrent_tasks = 4  # 限制最大并发任务数，防止卡顿
+        max_concurrent_tasks = 10  # 激进配置：单任务内10个频道对同时并发
         
         if len(clone_tasks) > max_concurrent_tasks:
             logging.warning(f"⚠️ 任务数量({len(clone_tasks)})超过最大并发数({max_concurrent_tasks})，将分批执行")
@@ -5644,14 +5917,30 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     # 检查是否所有任务都已完成
                     all_completed = all(task.done() for task in tasks)
                     if all_completed:
+                        logging.info("所有子任务已完成，停止定期状态更新")
                         break
                     
-                    # 每2秒强制更新一次状态
-                    await asyncio.sleep(2.0)
-                    await global_progress_update()
+                    # 每1秒强制更新一次状态（提高更新频率）
+                    await asyncio.sleep(1.0)
+                    
+                    # 强制更新所有任务的进度显示
+                    try:
+                        await global_progress_update()
+                        logging.debug("定期状态更新成功")
+                    except Exception as update_error:
+                        logging.warning(f"定期状态更新失败: {update_error}")
+                    
+                    # 额外检查：如果进度长时间没有变化，强制刷新
+                    current_time = time.time()
+                    for i, progress in task_progress.items():
+                        last_update = progress.get("last_update_time", 0)
+                        if current_time - last_update > 10:  # 10秒没有更新
+                            logging.warning(f"任务 {i+1} 进度长时间未更新，强制刷新")
+                            # 强制触发进度更新
+                            progress["force_refresh"] = True
                     
                 except Exception as e:
-                    logging.debug(f"定期状态更新失败: {e}")
+                    logging.error(f"定期状态更新异常: {e}")
                     break
         
         # 启动定期状态更新任务
@@ -5836,9 +6125,10 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         
         save_history()
         
-        # 发送任务完成通知
+        # 发送任务完成通知（在编辑消息之前）
         await send_task_completion_notification(message, user_id, task_id_short, total_stats, was_cancelled)
         
+        # 然后再编辑原消息显示统计信息
         await safe_edit_or_reply(message, final_text, 
                                reply_markup=InlineKeyboardMarkup(reply_buttons))
         
