@@ -103,7 +103,7 @@ print("🔄 FloodWait自动恢复检查已启动，每5分钟检查一次")
 
 # 启动媒体组超时清理线程
 def start_media_group_cleanup():
-    """启动媒体组超时清理，每30秒清理一次过期的媒体组缓存"""
+    """启动媒体组超时清理，每60秒清理一次过期的媒体组缓存"""
     import time
     import asyncio
     
@@ -114,61 +114,68 @@ def start_media_group_cleanup():
         
         while True:
             try:
-                # 等待30秒
-                time.sleep(30)
+                # 🔧 修复：延长检查间隔到60秒，减少与实时监听冲突
+                time.sleep(60)  # 从30秒改为60秒
                 
-                # 清理过期的媒体组缓存
+                # 清理过期的媒体组缓存（线程安全）
                 current_time = time.time()
                 expired_keys = []
+                expired_media_groups = []
                 
-                for key, messages in listen_media_groups.items():
-                    if messages:
-                        # 检查最早的消息是否超过60秒（从30秒改为60秒）
-                        earliest_time = getattr(messages[0], 'date', None)
-                        if earliest_time:
-                            time_diff = current_time - earliest_time.timestamp()
-                            if time_diff > 60:  # 延长到60秒，避免与10秒实时处理冲突
-                                expired_keys.append(key)
+                # 🔧 线程锁保护：在锁内检测并移除过期的媒体组，避免与实时路径竞争
+                with media_group_lock:
+                    for key, messages in list(listen_media_groups.items()):
+                        if messages:
+                            # 🔧 修复：延长过期时间到120秒，避免与5秒实时处理冲突
+                            earliest_time = getattr(messages[0], 'date', None)
+                            if earliest_time:
+                                time_diff = current_time - earliest_time.timestamp()
+                                if time_diff > 120:  # 从60秒改为120秒
+                                    expired_keys.append(key)
+                    
+                    # 在锁内移除并收集过期媒体组，避免重复处理
+                    for key in expired_keys:
+                        if key in listen_media_groups:  # 二次确认还在缓存中
+                            expired_messages = listen_media_groups.pop(key)
+                            expired_media_groups.append((key, expired_messages))
                 
-                # 处理过期的媒体组
-                for key in expired_keys:
-                    if key in listen_media_groups:
-                        expired_messages = listen_media_groups.pop(key)
-                        logging.warning(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息（可能不完整）")
+                # 在锁外处理过期的媒体组
+                for key, expired_messages in expired_media_groups:
+                    logging.warning(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息（可能不完整）")
+                    
+                    # 强制处理过期的媒体组，避免被分割
+                    try:
+                        # 获取频道组信息
+                        chat_id, media_group_id = key
                         
-                        # 强制处理过期的媒体组，避免被分割
-                        try:
-                            # 获取频道组信息
-                            chat_id, media_group_id = key
+                        # 查找匹配的频道组配置
+                        for uid, cfg in user_configs.items():
+                            if not cfg.get("realtime_listen"):
+                                continue
                             
-                            # 查找匹配的频道组配置
-                            for uid, cfg in user_configs.items():
-                                if not cfg.get("realtime_listen"):
+                            for pair in cfg.get("channel_pairs", []):
+                                if not pair.get("enabled", True) or not pair.get("monitor_enabled", False):
                                     continue
                                 
-                                for pair in cfg.get("channel_pairs", []):
-                                    if not pair.get("enabled", True) or not pair.get("monitor_enabled", False):
+                                source_channel = str(pair.get("source"))
+                                if source_channel == str(chat_id) or source_channel.lstrip('@') == str(chat_id).lstrip('@'):
+                                    # 找到匹配的频道组，强制处理媒体组
+                                    logging.info(f"🧹 强制处理过期媒体组: {source_channel} -> {pair.get('target')}")
+                                    
+                                    # 获取有效配置
+                                    effective_config = get_effective_config_for_realtime(uid, source_channel, pair.get('target'))
+                                    
+                                    # 过滤检查
+                                    filtered_messages = [m for m in expired_messages if should_filter_message(m, effective_config)]
+                                    if filtered_messages:
+                                        logging.info(f"🧹 过期媒体组 {media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过处理")
                                         continue
                                     
-                                    source_channel = str(pair.get("source"))
-                                    if source_channel == str(chat_id) or source_channel.lstrip('@') == str(chat_id).lstrip('@'):
-                                        # 找到匹配的频道组，强制处理媒体组
-                                        logging.info(f"🧹 强制处理过期媒体组: {source_channel} -> {pair.get('target')}")
-                                        
-                                        # 获取有效配置
-                                        effective_config = get_effective_config_for_realtime(uid, source_channel, pair.get('target'))
-                                        
-                                        # 过滤检查
-                                        filtered_messages = [m for m in expired_messages if should_filter_message(m, effective_config)]
-                                        if filtered_messages:
-                                            logging.info(f"🧹 过期媒体组 {media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过处理")
-                                            continue
-                                        
-                                        # 处理媒体组（异步调用）
-                                        loop.run_until_complete(process_expired_media_group(expired_messages, pair, effective_config, uid))
-                                        break
-                        except Exception as e:
-                            logging.error(f"🧹 处理过期媒体组失败: {e}")
+                                    # 处理媒体组（异步调用）
+                                    loop.run_until_complete(process_expired_media_group(expired_messages, pair, effective_config, uid))
+                                    break
+                    except Exception as e:
+                        logging.error(f"🧹 处理过期媒体组失败: {e}")
                         
             except Exception as e:
                 logging.error(f"❌ 媒体组超时清理出错: {e}")
@@ -180,7 +187,7 @@ def start_media_group_cleanup():
 # 启动媒体组清理线程
 media_cleanup_thread = threading.Thread(target=start_media_group_cleanup, daemon=True)
 media_cleanup_thread.start()
-print("🧹 媒体组超时清理已启动，每30秒检查一次")
+print("🧹 媒体组超时清理已启动，每60秒检查一次")
 
 async def process_expired_media_group(messages, pair, config, user_id):
     """处理过期的媒体组消息"""
@@ -903,6 +910,7 @@ user_states = {} # { user_id: [ {task_id: "...", state: "...", ...} ] }
 user_history = {} # 存储每个用户的历史记录
 listen_media_groups = {}  # {(chat_id, media_group_id): [messages]}
 realtime_dedupe_cache = {}  # 实时监听去重缓存 {(source_chat_id, target_chat_id): set()}
+media_group_lock = threading.Lock()  # 🔧 新增：媒体组缓存线程锁
 # 新搬运引擎实例和状态
 robust_cloning_engine = None
 running_task_cancellation = {}  # 任务ID -> 取消标志
@@ -949,36 +957,37 @@ running_task_cancellation = {}  # 任务ID -> 取消标志
 
 # ==================== 通用辅助 ====================
 def _is_media_group_complete(messages):
-    """检查媒体组是否完整（保守策略：延长等待时间，减少误判）"""
+    """检查媒体组是否完整（修复策略：更合理的触发条件，避免拆分）"""
     if len(messages) < 2:
         return False
     
     # 按ID排序检查连续性
     sorted_messages = sorted(messages, key=lambda m: m.id)
     
-    # 更保守的完整性判断：需要更多证据表明媒体组真的完整了
-    if len(sorted_messages) >= 5:  # 提高门槛，避免过早触发
+    # 🔧 修复：降低触发门槛，适应大部分媒体组（2-3个文件的情况）
+    if len(sorted_messages) >= 2:  # 从5降到2，避免小媒体组被过期清理抢夺
         max_gap = 0
         for i in range(1, len(sorted_messages)):
             gap = sorted_messages[i].id - sorted_messages[i-1].id
             max_gap = max(max_gap, gap)
         
-        # 如果最大ID间隔不超过2，且时间间隔超过8秒，才认为完整
-        if max_gap <= 2:
+        # 🔧 修复：更宽松的完整性判断，允许更大ID间隔
+        if max_gap <= 3:  # 从2增加到3，适应Telegram的消息ID分配模式
             first_time = getattr(sorted_messages[0], 'date', None)
             last_time = getattr(sorted_messages[-1], 'date', None)
             if first_time and last_time:
                 time_diff = (last_time - first_time).total_seconds()
-                if time_diff > 8:  # 提高时间门槛到8秒
+                # 🔧 修复：快速响应，从8秒降到3秒
+                if time_diff > 3:
                     return True
     
-    # 只有在时间间隔非常长的情况下才强制认为完整
-    if len(sorted_messages) >= 2:
+    # 🔧 修复：更早的超时触发，避免与清理线程冲突
+    if len(sorted_messages) >= 1:
         first_time = getattr(sorted_messages[0], 'date', None)
-        last_time = getattr(sorted_messages[-1], 'date', None)
-        if first_time and last_time:
-            time_diff = (last_time - first_time).total_seconds()
-            if time_diff > 15:  # 15秒没有新消息才认为真的完整了
+        if first_time:
+            time_diff = time.time() - first_time.timestamp()
+            # 🔧 修复：从15秒大幅降到5秒，在清理线程之前就处理
+            if time_diff > 5:
                 return True
     
     return False  # 默认认为不完整，继续等待
@@ -2982,31 +2991,33 @@ async def listen_and_clone(client, message):
             continue
         # 多媒体组聚合：等待同 media_group_id 的消息齐全
         if message.media_group_id:
-            key = (message.chat.id, message.media_group_id)
-            listen_media_groups.setdefault(key, []).append(message)
-            
-            # 更保守的触发策略，避免媒体组被拆分
-            messages = listen_media_groups[key]
-            should_process = False
-            
-            # 只在非常确定的情况下才立即处理
-            if _is_media_group_complete(messages):
-                should_process = True
-                logging.info(f"🔍 媒体组 {message.media_group_id} 确认完整({len(messages)}条)，立即处理")
-            elif len(messages) >= 20:  # 防止超大媒体组卡住（提高上限）
-                should_process = True
-                logging.info(f"🔍 媒体组 {message.media_group_id} 消息数过多({len(messages)})，强制处理")
-            elif len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 10:
-                # 延长等待时间到10秒，给更多时间收集完整媒体组
-                should_process = True
-                logging.info(f"🔍 媒体组 {message.media_group_id} 等待超时({len(messages)}条，10秒)，强制处理")
-            
-            if not should_process:
-                logging.debug(f"🔍 媒体组 {message.media_group_id} 等待更多消息({len(messages)}条)")
-                return
+            with media_group_lock:  # 🔧 线程锁保护
+                key = (message.chat.id, message.media_group_id)
+                listen_media_groups.setdefault(key, []).append(message)
                 
-            # 使用统一的排序逻辑
-            group_messages = sorted(listen_media_groups.pop(key), key=lambda m: (m.id, getattr(m, 'date', 0)))
+                # 🔧 修复：更积极的触发策略，避免媒体组被拆分
+                messages = listen_media_groups[key]
+                should_process = False
+                
+                # 🔧 调整：更积极的处理策略，避免媒体组被拆分
+                if _is_media_group_complete(messages):
+                    should_process = True
+                    logging.info(f"🔍 媒体组 {message.media_group_id} 确认完整({len(messages)}条)，立即处理")
+                elif len(messages) >= 10:  # 从20降到10
+                    should_process = True
+                    logging.info(f"🔍 媒体组 {message.media_group_id} 消息数过多({len(messages)})，强制处理")
+                elif len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 5:
+                    # 🔧 从10秒降至5秒，先于清理线程
+                    should_process = True
+                    logging.info(f"🔍 媒体组 {message.media_group_id} 等待超时({len(messages)}条，5秒)，强制处理")
+                
+                if not should_process:
+                    logging.debug(f"🔍 媒体组 {message.media_group_id} 等待更多消息({len(messages)}条)")
+                    return
+                    
+                # 🔧 先移除缓存，防止清理线程重复处理
+                group_messages = sorted(listen_media_groups.pop(key), key=lambda m: (m.id, getattr(m, 'date', 0)))
+                
             logging.info(f"📦 准备处理媒体组 {message.media_group_id}，最终包含 {len(group_messages)} 条消息")
             # 过滤整组
             logging.info(f"🔍 实时监听: 开始过滤检查媒体组 {message.media_group_id}，包含 {len(group_messages)} 条消息")
