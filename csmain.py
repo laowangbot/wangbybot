@@ -141,41 +141,59 @@ def start_media_group_cleanup():
                 
                 # 在锁外处理过期的媒体组
                 for key, expired_messages in expired_media_groups:
-                    logging.warning(f"🧹 媒体组超时清理: 强制处理媒体组 {key[1]}，包含 {len(expired_messages)} 条消息（可能不完整）")
+                    chat_id, media_group_id = key
                     
-                    # 强制处理过期的媒体组，避免被分割
-                    try:
-                        # 获取频道组信息
-                        chat_id, media_group_id = key
+                    # 🔧 新增：检查媒体组是否已经在处理中，避免与实时监听器冲突
+                    if is_media_group_processing(media_group_id):
+                        logging.info(f"🧹 媒体组 {media_group_id} 已在实时处理中，跳过清理")
+                        continue
+                    
+                    # 🔧 新增：获取媒体组专用锁
+                    media_group_specific_lock = get_media_group_lock(media_group_id)
+                    
+                    with media_group_specific_lock:
+                        # 再次检查处理状态（双重检查锁定模式）
+                        if is_media_group_processing(media_group_id):
+                            logging.info(f"🧹 媒体组 {media_group_id} 已在处理中（双重检查），跳过清理")
+                            continue
                         
-                        # 查找匹配的频道组配置
-                        for uid, cfg in user_configs.items():
-                            if not cfg.get("realtime_listen"):
-                                continue
-                            
-                            for pair in cfg.get("channel_pairs", []):
-                                if not pair.get("enabled", True) or not pair.get("monitor_enabled", False):
+                        # 标记为处理中
+                        mark_media_group_processing(media_group_id)
+                        logging.warning(f"🧹 媒体组超时清理: 强制处理媒体组 {media_group_id}，包含 {len(expired_messages)} 条消息（可能不完整）")
+                        
+                        try:
+                            # 查找匹配的频道组配置
+                            for uid, cfg in user_configs.items():
+                                if not cfg.get("realtime_listen"):
                                     continue
                                 
-                                source_channel = str(pair.get("source"))
-                                if source_channel == str(chat_id) or source_channel.lstrip('@') == str(chat_id).lstrip('@'):
-                                    # 找到匹配的频道组，强制处理媒体组
-                                    logging.info(f"🧹 强制处理过期媒体组: {source_channel} -> {pair.get('target')}")
-                                    
-                                    # 获取有效配置
-                                    effective_config = get_effective_config_for_realtime(uid, source_channel, pair.get('target'))
-                                    
-                                    # 过滤检查
-                                    filtered_messages = [m for m in expired_messages if should_filter_message(m, effective_config)]
-                                    if filtered_messages:
-                                        logging.info(f"🧹 过期媒体组 {media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过处理")
+                                for pair in cfg.get("channel_pairs", []):
+                                    if not pair.get("enabled", True) or not pair.get("monitor_enabled", False):
                                         continue
                                     
-                                    # 处理媒体组（异步调用）
-                                    loop.run_until_complete(process_expired_media_group(expired_messages, pair, effective_config, uid))
-                                    break
-                    except Exception as e:
-                        logging.error(f"🧹 处理过期媒体组失败: {e}")
+                                    source_channel = str(pair.get("source"))
+                                    if source_channel == str(chat_id) or source_channel.lstrip('@') == str(chat_id).lstrip('@'):
+                                        # 找到匹配的频道组，强制处理媒体组
+                                        logging.info(f"🧹 强制处理过期媒体组: {source_channel} -> {pair.get('target')}")
+                                        
+                                        # 获取有效配置
+                                        effective_config = get_effective_config_for_realtime(uid, source_channel, pair.get('target'))
+                                        
+                                        # 过滤检查
+                                        filtered_messages = [m for m in expired_messages if should_filter_message(m, effective_config)]
+                                        if filtered_messages:
+                                            logging.info(f"🧹 过期媒体组 {media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过处理")
+                                            continue
+                                        
+                                        # 处理媒体组（异步调用）
+                                        loop.run_until_complete(process_expired_media_group(expired_messages, pair, effective_config, uid))
+                                        break
+                        except Exception as e:
+                            logging.error(f"🧹 处理过期媒体组失败: {e}")
+                        finally:
+                            # 🔧 处理完成后清理状态
+                            cleanup_media_group_status(media_group_id)
+                            logging.info(f"🧹 过期媒体组 {media_group_id} 清理完成，释放锁")
                         
             except Exception as e:
                 logging.error(f"❌ 媒体组超时清理出错: {e}")
@@ -911,6 +929,12 @@ user_history = {} # 存储每个用户的历史记录
 listen_media_groups = {}  # {(chat_id, media_group_id): [messages]}
 realtime_dedupe_cache = {}  # 实时监听去重缓存 {(source_chat_id, target_chat_id): set()}
 media_group_lock = threading.Lock()  # 🔧 新增：媒体组缓存线程锁
+
+# 🔧 新增：基于media_group_id的专门锁定机制，防止同一媒体组被多次处理
+media_group_processing_locks = {}  # {media_group_id: threading.Lock()}
+media_group_processing_status = {}  # {media_group_id: "processing"|"completed"}
+media_group_status_lock = threading.Lock()  # 保护处理状态字典的锁
+
 # 新搬运引擎实例和状态
 robust_cloning_engine = None
 running_task_cancellation = {}  # 任务ID -> 取消标志
@@ -956,6 +980,34 @@ running_task_cancellation = {}  # 任务ID -> 取消标志
 # 系统维护按钮已移除
 
 # ==================== 通用辅助 ====================
+def get_media_group_lock(media_group_id):
+    """获取指定媒体组的专用锁，如果不存在则创建"""
+    with media_group_status_lock:
+        if media_group_id not in media_group_processing_locks:
+            media_group_processing_locks[media_group_id] = threading.Lock()
+        return media_group_processing_locks[media_group_id]
+
+def is_media_group_processing(media_group_id):
+    """检查指定媒体组是否正在处理中"""
+    with media_group_status_lock:
+        return media_group_processing_status.get(media_group_id) == "processing"
+
+def mark_media_group_processing(media_group_id):
+    """标记媒体组为处理中状态"""
+    with media_group_status_lock:
+        media_group_processing_status[media_group_id] = "processing"
+
+def mark_media_group_completed(media_group_id):
+    """标记媒体组为已完成状态"""
+    with media_group_status_lock:
+        media_group_processing_status[media_group_id] = "completed"
+
+def cleanup_media_group_status(media_group_id):
+    """清理媒体组的处理状态和锁（在处理完成后调用）"""
+    with media_group_status_lock:
+        media_group_processing_status.pop(media_group_id, None)
+        media_group_processing_locks.pop(media_group_id, None)
+
 def _is_media_group_complete(messages):
     """检查媒体组是否完整（修复策略：更合理的触发条件，避免拆分）"""
     if len(messages) < 2:
@@ -1184,6 +1236,8 @@ def ensure_user_config_exists(user_id):
             "channel_pairs": [],
             "remove_links": False,
         "remove_links_mode": "links_only",  # links_only | whole_text
+            "remove_magnet_links": False,  # 新增：移除磁力链接
+            "remove_all_links": False,     # 新增：移除所有类型链接
             "remove_hashtags": False,
             "remove_usernames": False,
             "filter_photo": False,
@@ -1799,14 +1853,16 @@ async def show_file_filter_menu(message, user_id):
 async def toggle_content_removal_menu(message, user_id):
     config = user_configs.get(str(user_id), {})
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🔗 移除超链接: {'✅ 开启' if config.get('remove_links', False) else '❌ 关闭'}", callback_data="toggle_remove_links")],
+        [InlineKeyboardButton(f"🔗 移除HTTP链接: {'✅ 开启' if config.get('remove_links', False) else '❌ 关闭'}", callback_data="toggle_remove_links")],
         [InlineKeyboardButton(f"🔗 处理模式: {'📝 仅移除链接' if config.get('remove_links_mode', 'links_only') == 'links_only' else '🗑️ 移除整条消息'}", callback_data="toggle_remove_links_mode")],
+        [InlineKeyboardButton(f"🧲 移除磁力链接: {'✅ 开启' if config.get('remove_magnet_links', False) else '❌ 关闭'}", callback_data="toggle_remove_magnet_links")],
+        [InlineKeyboardButton(f"🌐 移除所有链接: {'✅ 开启' if config.get('remove_all_links', False) else '❌ 关闭'}", callback_data="toggle_remove_all_links")],
         [InlineKeyboardButton(f"🏷 移除Hashtags: {'✅ 开启' if config.get('remove_hashtags', False) else '❌ 关闭'}", callback_data="toggle_remove_hashtags")],
         [InlineKeyboardButton(f"👤 移除@使用者名: {'✅ 开启' if config.get('remove_usernames', False) else '❌ 关闭'}", callback_data="toggle_remove_usernames")],
         [InlineKeyboardButton("🔙 返回功能设定", callback_data="show_feature_config_menu")]
     ])
     await safe_edit_or_reply(message,
-                             "📝 **文本内容移除设定**\n选择您想要自动移除的内容类型：",
+                             "📝 **文本内容移除设定**\n选择您想要自动移除的内容类型：\n\n🔗 HTTP链接：移除http/https链接\n🧲 磁力链接：移除magnet链接\n🌐 所有链接：移除所有类型的链接",
                              reply_markup=buttons)
 
 async def show_frequency_settings(message, user_id):
@@ -2991,118 +3047,153 @@ async def listen_and_clone(client, message):
             continue
         # 多媒体组聚合：等待同 media_group_id 的消息齐全
         if message.media_group_id:
-            with media_group_lock:  # 🔧 线程锁保护
-                key = (message.chat.id, message.media_group_id)
-                listen_media_groups.setdefault(key, []).append(message)
-                
-                # 🔧 修复：更积极的触发策略，避免媒体组被拆分
-                messages = listen_media_groups[key]
-                should_process = False
-                
-                # 🔧 调整：更积极的处理策略，避免媒体组被拆分
-                if _is_media_group_complete(messages):
-                    should_process = True
-                    logging.info(f"🔍 媒体组 {message.media_group_id} 确认完整({len(messages)}条)，立即处理")
-                elif len(messages) >= 10:  # 从20降到10
-                    should_process = True
-                    logging.info(f"🔍 媒体组 {message.media_group_id} 消息数过多({len(messages)})，强制处理")
-                elif len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 5:
-                    # 🔧 从10秒降至5秒，先于清理线程
-                    should_process = True
-                    logging.info(f"🔍 媒体组 {message.media_group_id} 等待超时({len(messages)}条，5秒)，强制处理")
-                
-                if not should_process:
-                    logging.debug(f"🔍 媒体组 {message.media_group_id} 等待更多消息({len(messages)}条)")
-                    return
-                    
-                # 🔧 先移除缓存，防止清理线程重复处理
-                group_messages = sorted(listen_media_groups.pop(key), key=lambda m: (m.id, getattr(m, 'date', 0)))
-                
-            logging.info(f"📦 准备处理媒体组 {message.media_group_id}，最终包含 {len(group_messages)} 条消息")
-            # 过滤整组
-            logging.info(f"🔍 实时监听: 开始过滤检查媒体组 {message.media_group_id}，包含 {len(group_messages)} 条消息")
-            filtered_messages = [m for m in group_messages if should_filter_message(m, cfg)]
-            if filtered_messages:
-                logging.info(f"🚫 实时监听: 媒体组 {message.media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过整组")
+            # 🔧 新增：检查媒体组是否已经在处理中，避免重复处理
+            if is_media_group_processing(message.media_group_id):
+                logging.info(f"🔒 媒体组 {message.media_group_id} 已在处理中，跳过")
                 continue
-            logging.info(f"✅ 实时监听: 媒体组 {message.media_group_id} 通过过滤检查，继续处理")
             
-            # 实时监听媒体组去重检查 - 改进版
-            cache_key = (message.chat.id, pair['target'])
-            if cache_key not in realtime_dedupe_cache:
-                realtime_dedupe_cache[cache_key] = set()
+            # 🔧 新增：获取媒体组专用锁，确保同一媒体组不会被多个线程同时处理
+            media_group_specific_lock = get_media_group_lock(message.media_group_id)
             
-            # 生成基于消息范围和数量的去重键，而非仅 media_group_id
-            first_id = min(m.id for m in group_messages)
-            last_id = max(m.id for m in group_messages)
-            media_group_dedup_key = ("media_group", message.media_group_id, first_id, last_id, len(group_messages))
-            
-            if media_group_dedup_key in realtime_dedupe_cache[cache_key]:
-                logging.debug(f"实时监听: 跳过重复媒体组 {message.media_group_id} ({first_id}-{last_id}, {len(group_messages)}条)")
-                continue
-            realtime_dedupe_cache[cache_key].add(media_group_dedup_key)
-            media_list = []
-            caption = ""
-            reply_markup = None
-            full_text_content = ""  # 收集所有文本内容
-            
-            # 收集媒体组中的所有文本内容（实时监听版本）
-            for m in group_messages:
-                # 收集caption和text
-                if m.caption or m.text:
-                    text_content = m.caption or m.text
-                    if text_content.strip() and text_content not in full_text_content:
-                        if full_text_content:
-                            full_text_content += "\n\n" + text_content
-                        else:
-                            full_text_content = text_content
+            with media_group_specific_lock:
+                # 再次检查处理状态（双重检查锁定模式）
+                if is_media_group_processing(message.media_group_id):
+                    logging.info(f"🔒 媒体组 {message.media_group_id} 已在处理中（双重检查），跳过")
+                    continue
                 
-                # 收集引用的文本内容
-                if m.reply_to_message and m.reply_to_message.text:
-                    quoted_text = m.reply_to_message.text
-                    if quoted_text.strip() and quoted_text not in full_text_content:
-                        # 添加引用标记
-                        quoted_format = f"💬 引用消息：\n{quoted_text}"
-                        if full_text_content:
-                            full_text_content = quoted_format + "\n\n" + full_text_content
-                        else:
-                            full_text_content = quoted_format
-            
-            # 处理收集到的完整文本内容
-            if full_text_content:
-                caption, reply_markup = process_message_content(full_text_content, cfg)
-            
-            # 构建媒体列表
-            for i, m in enumerate(group_messages):
-                if m.photo:
-                    media_list.append(InputMediaPhoto(m.photo.file_id, caption=caption if i == 0 else ""))
-                elif m.video:
-                    media_list.append(InputMediaVideo(m.video.file_id, caption=caption if i == 0 else ""))
-            if media_list:
+                # 标记为处理中
+                mark_media_group_processing(message.media_group_id)
+                logging.info(f"🔒 媒体组 {message.media_group_id} 开始处理，已加锁")
+                
                 try:
-                    # 如果有按钮，将按钮文本添加到第一个媒体的caption中，避免分成两条消息
-                    if reply_markup and media_list:
-                        button_text = "\n\n📋 按钮："
-                        for row in reply_markup.inline_keyboard:
-                            for button in row:
-                                if hasattr(button, 'text') and hasattr(button, 'url') and button.text and button.url:
-                                    button_text += f"\n• {button.text}: {button.url}"
+                    with media_group_lock:  # 🔧 线程锁保护
+                        key = (message.chat.id, message.media_group_id)
+                        listen_media_groups.setdefault(key, []).append(message)
                         
-                        # 将按钮信息添加到第一个媒体的caption中
-                        if media_list[0].caption:
-                            media_list[0].caption += button_text
-                        else:
-                            media_list[0].caption = button_text.strip()
+                        # 🔧 修复：更积极的触发策略，避免媒体组被拆分
+                        messages = listen_media_groups[key]
+                        should_process = False
+                        
+                        # 🔧 调整：更积极的处理策略，避免媒体组被拆分
+                        if _is_media_group_complete(messages):
+                            should_process = True
+                            logging.info(f"🔍 媒体组 {message.media_group_id} 确认完整({len(messages)}条)，立即处理")
+                        elif len(messages) >= 10:  # 从20降到10
+                            should_process = True
+                            logging.info(f"🔍 媒体组 {message.media_group_id} 消息数过多({len(messages)}条)，强制处理")
+                        elif len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 5:
+                            # 🔧 从10秒降至5秒，先于清理线程
+                            should_process = True
+                            logging.info(f"🔍 媒体组 {message.media_group_id} 等待超时({len(messages)}条，5秒)，强制处理")
+                        
+                        if not should_process:
+                            logging.debug(f"🔍 媒体组 {message.media_group_id} 等待更多消息({len(messages)}条)")
+                            # 🔧 重要：如果不处理，需要取消处理状态标记
+                            mark_media_group_completed(message.media_group_id)
+                            return
+                            
+                        # 🔧 先移除缓存，防止清理线程重复处理
+                        group_messages = sorted(listen_media_groups.pop(key), key=lambda m: (m.id, getattr(m, 'date', 0)))
+                        
+                    # 🔧 媒体组处理逻辑继续...
+                    logging.info(f"📦 准备处理媒体组 {message.media_group_id}，最终包含 {len(group_messages)} 条消息")
                     
-                    await client.send_media_group(chat_id=pair['target'], media=media_list)
+                    # 过滤整组
+                    logging.info(f"🔍 实时监听: 开始过滤检查媒体组 {message.media_group_id}，包含 {len(group_messages)} 条消息")
+                    filtered_messages = [m for m in group_messages if should_filter_message(m, cfg)]
+                    if filtered_messages:
+                        logging.info(f"🚫 实时监听: 媒体组 {message.media_group_id} 中有 {len(filtered_messages)} 条消息被过滤，跳过整组")
+                        continue
+                    logging.info(f"✅ 实时监听: 媒体组 {message.media_group_id} 通过过滤检查，继续处理")
                     
-                    # 移除单独的按钮发送，避免分成两条消息
-                    # if reply_markup:
-                    #     # 使用安全的按钮发送函数，避免 MESSAGE_EMPTY 错误
-                    #     await safe_send_button_message(client, pair['target'], reply_markup, "媒体组")
+                    # 实时监听媒体组去重检查 - 改进版
+                    cache_key = (message.chat.id, pair['target'])
+                    if cache_key not in realtime_dedupe_cache:
+                        realtime_dedupe_cache[cache_key] = set()
+                    
+                    # 生成基于消息范围和数量的去重键，而非仅 media_group_id
+                    first_id = min(m.id for m in group_messages)
+                    last_id = max(m.id for m in group_messages)
+                    media_group_dedup_key = ("media_group", message.media_group_id, first_id, last_id, len(group_messages))
+                    
+                    if media_group_dedup_key in realtime_dedupe_cache[cache_key]:
+                        logging.debug(f"实时监听: 跳过重复媒体组 {message.media_group_id} ({first_id}-{last_id}, {len(group_messages)}条)")
+                        continue
+                    realtime_dedupe_cache[cache_key].add(media_group_dedup_key)
+                    
+                    media_list = []
+                    caption = ""
+                    reply_markup = None
+                    full_text_content = ""  # 收集所有文本内容
+                    
+                    # 收集媒体组中的所有文本内容（实时监听版本）
+                    for m in group_messages:
+                        # 收集caption和text
+                        if m.caption or m.text:
+                            text_content = m.caption or m.text
+                            if text_content.strip() and text_content not in full_text_content:
+                                if full_text_content:
+                                    full_text_content += "\n\n" + text_content
+                                else:
+                                    full_text_content = text_content
+                        
+                        # 收集引用的文本内容
+                        if m.reply_to_message and m.reply_to_message.text:
+                            quoted_text = m.reply_to_message.text
+                            if quoted_text.strip() and quoted_text not in full_text_content:
+                                # 添加引用标记
+                                quoted_format = f"💬 引用消息：\n{quoted_text}"
+                                if full_text_content:
+                                    full_text_content = quoted_format + "\n\n" + full_text_content
+                                else:
+                                    full_text_content = quoted_format
+                    
+                    # 处理收集到的完整文本内容
+                    if full_text_content:
+                        caption, reply_markup = process_message_content(full_text_content, cfg)
+                    
+                    # 构建媒体列表
+                    for i, m in enumerate(group_messages):
+                        if m.photo:
+                            media_list.append(InputMediaPhoto(m.photo.file_id, caption=caption if i == 0 else ""))
+                        elif m.video:
+                            media_list.append(InputMediaVideo(m.video.file_id, caption=caption if i == 0 else ""))
+                    if media_list:
+                        try:
+                            # 如果有按钮，将按钮文本添加到第一个媒体的caption中，避免分成两条消息
+                            if reply_markup and media_list:
+                                button_text = "\n\n📋 按钮："
+                                for row in reply_markup.inline_keyboard:
+                                    for button in row:
+                                        if hasattr(button, 'text') and hasattr(button, 'url') and button.text and button.url:
+                                            button_text += f"\n• {button.text}: {button.url}"
+                                
+                                # 将按钮信息添加到第一个媒体的caption中
+                                if media_list[0].caption:
+                                    media_list[0].caption += button_text
+                                else:
+                                    media_list[0].caption = button_text.strip()
+                            
+                            await client.send_media_group(chat_id=pair['target'], media=media_list)
+                            
+                            # 移除单独的按钮发送，避免分成两条消息
+                            # if reply_markup:
+                            #     # 使用安全的按钮发送函数，避免 MESSAGE_EMPTY 错误
+                            #     await safe_send_button_message(client, pair['target'], reply_markup, "媒体组")
+                        except Exception as e:
+                            logging.error(f"媒体组 {message.media_group_id} 处理失败: {e}")
+                        finally:
+                            # 🔧 处理完成后清理状态
+                            cleanup_media_group_status(message.media_group_id)
+                            logging.info(f"🔓 媒体组 {message.media_group_id} 处理完成，释放锁")
+                    
+                    return
                 except Exception as e:
-                    logging.error(f"监听搬运媒体组失败: {e}")
-            return
+                    logging.error(f"媒体组处理异常: {e}")
+                    # 🔧 异常情况下也要清理状态
+                    cleanup_media_group_status(message.media_group_id)
+                    logging.info(f"🔓 媒体组 {message.media_group_id} 异常处理完成，释放锁")
+                    return
         # 非媒体组单条
         logging.info(f"🔍 实时监听: 开始过滤检查消息 {message.id}")
         if should_filter_message(message, cfg):
@@ -5600,21 +5691,50 @@ async def safe_send_button_message(client, chat_id, reply_markup, context="媒�
 def _simple_process_content(text, config):
     """简化的消息内容处理（回退方案）"""
     processed_text = text
+    import re
     
-    # 基础文本处理
-    if config.get("remove_links", False):
-        import re
+    # 定义各种链接的正则表达式
+    http_pattern = r'https?://[^\s/$.?#].[^\s]*'
+    magnet_pattern = r'magnet:\?[^\s]*'
+    ftp_pattern = r'ftp://[^\s]*'
+    telegram_pattern = r't\.me/[^\s]*'
+    
+    # 移除所有类型链接
+    if config.get("remove_all_links", False):
         remove_mode = config.get("remove_links_mode", "links_only")
+        all_links_pattern = f'({http_pattern}|{magnet_pattern}|{ftp_pattern}|{telegram_pattern})'
         
         if remove_mode == "whole_text":
-            # 如果文本包含超链接，则整个文本都被移除
-            if re.search(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', processed_text):
-                processed_text = ""  # 整个文本被移除
-                logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
-        else:  # links_only 模式
-            # 只移除超链接，保留其他文本
-            processed_text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', processed_text)
-            logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
+            if re.search(all_links_pattern, processed_text, flags=re.MULTILINE | re.IGNORECASE):
+                processed_text = ""
+                logging.info(f"🌐 所有链接过滤: 文本包含链接，整个文本被移除")
+        else:
+            processed_text = re.sub(all_links_pattern, '', processed_text, flags=re.MULTILINE | re.IGNORECASE)
+            logging.info(f"🌐 所有链接过滤: 移除所有类型链接，保留其他文本")
+    else:
+        # 单独处理HTTP链接
+        if config.get("remove_links", False):
+            remove_mode = config.get("remove_links_mode", "links_only")
+            
+            if remove_mode == "whole_text":
+                if re.search(http_pattern, processed_text, flags=re.MULTILINE):
+                    processed_text = ""
+                    logging.info(f"🔗 HTTP链接过滤: 文本包含HTTP链接，整个文本被移除")
+            else:
+                processed_text = re.sub(http_pattern, '', processed_text, flags=re.MULTILINE)
+                logging.info(f"🔗 HTTP链接过滤: 只移除HTTP链接，保留其他文本")
+        
+        # 单独处理磁力链接
+        if config.get("remove_magnet_links", False):
+            remove_mode = config.get("remove_links_mode", "links_only")
+            
+            if remove_mode == "whole_text":
+                if re.search(magnet_pattern, processed_text, flags=re.MULTILINE | re.IGNORECASE):
+                    processed_text = ""
+                    logging.info(f"🧲 磁力链接过滤: 文本包含磁力链接，整个文本被移除")
+            else:
+                processed_text = re.sub(magnet_pattern, '', processed_text, flags=re.MULTILINE | re.IGNORECASE)
+                logging.info(f"🧲 磁力链接过滤: 只移除磁力链接，保留其他文本")
     
     if config.get("remove_hashtags", False):
         import re
@@ -5794,6 +5914,18 @@ async def handle_toggle_options(message, user_id, data):
     elif option == "remove_usernames":
         user_configs[str(user_id)]["remove_usernames"] = not user_configs[str(user_id)].get("remove_usernames", False)
         logging.info(f"用户 {user_id} toggled remove_usernames to {user_configs[str(user_id)]['remove_usernames']}")
+    elif option == "remove_magnet_links":
+        user_configs[str(user_id)]["remove_magnet_links"] = not user_configs[str(user_id)].get("remove_magnet_links", False)
+        logging.info(f"用户 {user_id} toggled remove_magnet_links to {user_configs[str(user_id)]['remove_magnet_links']}")
+    elif option == "remove_all_links":
+        user_configs[str(user_id)]["remove_all_links"] = not user_configs[str(user_id)].get("remove_all_links", False)
+        logging.info(f"用户 {user_id} toggled remove_all_links to {user_configs[str(user_id)]['remove_all_links']}")
+    elif option == "remove_magnet_links":
+        user_configs[str(user_id)]["remove_magnet_links"] = not user_configs[str(user_id)].get("remove_magnet_links", False)
+        logging.info(f"用户 {user_id} toggled remove_magnet_links to {user_configs[str(user_id)]['remove_magnet_links']}")
+    elif option == "remove_all_links":
+        user_configs[str(user_id)]["remove_all_links"] = not user_configs[str(user_id)].get("remove_all_links", False)
+        logging.info(f"用户 {user_id} toggled remove_all_links to {user_configs[str(user_id)]['remove_all_links']}")
     elif option == "filter_photo":
         user_configs[str(user_id)]["filter_photo"] = not user_configs[str(user_id)].get("filter_photo", False)
         logging.info(f"用户 {user_id} toggled filter_photo to {user_configs[str(user_id)]['filter_photo']}")

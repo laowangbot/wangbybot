@@ -363,7 +363,56 @@ class OptimizedListener:
     def _process_message_content_text(self, text: str, cfg: Dict):
         """处理文本内容"""
         try:
+            import re
             processed_text = text
+            
+            # 定义各种链接的正则表达式
+            http_pattern = r'https?://[^\s/$.?#].[^\s]*'
+            magnet_pattern = r'magnet:\?[^\s]*'
+            ftp_pattern = r'ftp://[^\s]*'
+            telegram_pattern = r't\.me/[^\s]*'
+            
+            # 移除所有类型链接
+            if cfg.get("remove_all_links", False):
+                remove_mode = cfg.get("remove_links_mode", "links_only")
+                all_links_pattern = f'({http_pattern}|{magnet_pattern}|{ftp_pattern}|{telegram_pattern})'
+                
+                if remove_mode == "whole_text":
+                    if re.search(all_links_pattern, processed_text, flags=re.MULTILINE | re.IGNORECASE):
+                        processed_text = ""
+                        logging.info(f"🌐 所有链接过滤: 文本包含链接，整个文本被移除")
+                else:
+                    processed_text = re.sub(all_links_pattern, '', processed_text, flags=re.MULTILINE | re.IGNORECASE)
+                    logging.info(f"🌐 所有链接过滤: 移除所有类型链接，保留其他文本")
+            else:
+                # 单独处理各种链接类型
+                if cfg.get("remove_links", False):
+                    remove_mode = cfg.get("remove_links_mode", "links_only")
+                    if remove_mode == "whole_text":
+                        if re.search(http_pattern, processed_text, flags=re.MULTILINE):
+                            processed_text = ""
+                            logging.info(f"🔗 HTTP链接过滤: 文本包含HTTP链接，整个文本被移除")
+                        else:
+                            processed_text = re.sub(http_pattern, '', processed_text, flags=re.MULTILINE)
+                            logging.info(f"🔗 HTTP链接过滤: 只移除HTTP链接，保留其他文本")
+                    
+                    if cfg.get("remove_magnet_links", False):
+                        remove_mode = cfg.get("remove_links_mode", "links_only")
+                        if remove_mode == "whole_text":
+                            if re.search(magnet_pattern, processed_text, flags=re.MULTILINE | re.IGNORECASE):
+                                processed_text = ""
+                                logging.info(f"🧲 磁力链接过滤: 文本包含磁力链接，整个文本被移除")
+                            else:
+                                processed_text = re.sub(magnet_pattern, '', processed_text, flags=re.MULTILINE | re.IGNORECASE)
+                                logging.info(f"🧲 磁力链接过滤: 只移除磁力链接，保留其他文本")
+            
+            # 移除用户名
+            if cfg.get("remove_usernames", False):
+                processed_text = re.sub(r'@\w+', '', processed_text)
+            
+            # 移除井号标签
+            if cfg.get("remove_hashtags", False):
+                processed_text = re.sub(r'#\w+', '', processed_text)
             
             # 敏感词替换
             replacement_words = cfg.get("replacement_words", {})

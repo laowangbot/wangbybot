@@ -729,19 +729,47 @@ class RobustCloningEngine:
         text = message.text or message.caption or ""
         
         # 基础文本处理
-        if config.get("remove_links", False):
-            import re
+        import re
+        
+        # 定义各种链接的正则表达式
+        http_pattern = r'https?://[^\s/$.?#].[^\s]*'
+        magnet_pattern = r'magnet:\?[^\s]*'
+        ftp_pattern = r'ftp://[^\s]*'
+        telegram_pattern = r't\.me/[^\s]*'
+        
+        # 移除所有类型链接
+        if config.get("remove_all_links", False):
             remove_mode = config.get("remove_links_mode", "links_only")
+            all_links_pattern = f'({http_pattern}|{magnet_pattern}|{ftp_pattern}|{telegram_pattern})'
             
             if remove_mode == "whole_text":
-                # 如果文本包含超链接，则整个文本都被移除
-                if re.search(r'https?://[^\s/$.?#].[^\s]*', text, flags=re.MULTILINE):
-                    text = ""  # 整个文本被移除
-                    logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
-            else:  # links_only 模式
-                # 只移除超链接，保留其他文本
-                text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', text, flags=re.MULTILINE)
-                logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
+                if re.search(all_links_pattern, text, flags=re.MULTILINE | re.IGNORECASE):
+                    text = ""
+                    logging.info(f"🌐 所有链接过滤: 文本包含链接，整个文本被移除")
+            else:
+                text = re.sub(all_links_pattern, '', text, flags=re.MULTILINE | re.IGNORECASE)
+                logging.info(f"🌐 所有链接过滤: 移除所有类型链接，保留其他文本")
+        else:
+            # 单独处理各种链接类型
+            if config.get("remove_links", False):
+                remove_mode = config.get("remove_links_mode", "links_only")
+                if remove_mode == "whole_text":
+                    if re.search(http_pattern, text, flags=re.MULTILINE):
+                        text = ""
+                        logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
+                else:
+                    text = re.sub(http_pattern, '', text, flags=re.MULTILINE)
+                    logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
+            
+            if config.get("remove_magnet_links", False):
+                remove_mode = config.get("remove_links_mode", "links_only")
+                if remove_mode == "whole_text":
+                    if re.search(magnet_pattern, text, flags=re.MULTILINE | re.IGNORECASE):
+                        text = ""
+                        logging.info(f"🧲 磁力链接过滤: 文本包含磁力链接，整个文本被移除")
+                else:
+                    text = re.sub(magnet_pattern, '', text, flags=re.MULTILINE | re.IGNORECASE)
+                    logging.info(f"🧲 磁力链接过滤: 只移除磁力链接，保留其他文本")
         
         # 添加尾巴文本（简化版本）
         tail_text = config.get("tail_text", "")
@@ -784,19 +812,45 @@ class RobustCloningEngine:
         # 文本处理
         processed_text = text
         
-        # 移除链接
-        if config.get("remove_links", False):
+        # 定义各种链接的正则表达式
+        http_pattern = r'https?://[^\s/$.?#].[^\s]*'
+        magnet_pattern = r'magnet:\?[^\s]*'
+        ftp_pattern = r'ftp://[^\s]*'
+        telegram_pattern = r't\.me/[^\s]*'
+        
+        # 移除所有类型链接
+        if config.get("remove_all_links", False):
             remove_mode = config.get("remove_links_mode", "links_only")
+            all_links_pattern = f'({http_pattern}|{magnet_pattern}|{ftp_pattern}|{telegram_pattern})'
             
             if remove_mode == "whole_text":
-                # 如果文本包含超链接，则整个文本都被移除
-                if re.search(r'https?://[^\s/$.?#].[^\s]*', processed_text, flags=re.MULTILINE):
-                    processed_text = ""  # 整个文本被移除
-                    logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
-            else:  # links_only 模式
-                # 只移除超链接，保留其他文本
-                processed_text = re.sub(r'https?://[^\s/$.?#].[^\s]*', '', processed_text, flags=re.MULTILINE)
-                logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
+                if re.search(all_links_pattern, processed_text, flags=re.MULTILINE | re.IGNORECASE):
+                    processed_text = ""
+                    logging.info(f"🌐 所有链接过滤: 文本包含链接，整个文本被移除")
+            else:
+                processed_text = re.sub(all_links_pattern, '', processed_text, flags=re.MULTILINE | re.IGNORECASE)
+                logging.info(f"🌐 所有链接过滤: 移除所有类型链接，保留其他文本")
+        else:
+            # 单独处理各种链接类型
+            if config.get("remove_links", False):
+                remove_mode = config.get("remove_links_mode", "links_only")
+                if remove_mode == "whole_text":
+                    if re.search(http_pattern, processed_text, flags=re.MULTILINE):
+                        processed_text = ""
+                        logging.info(f"🔗 超链接过滤: 文本包含超链接，整个文本被移除")
+                else:
+                    processed_text = re.sub(http_pattern, '', processed_text, flags=re.MULTILINE)
+                    logging.info(f"🔗 超链接过滤: 只移除超链接，保留其他文本")
+            
+            if config.get("remove_magnet_links", False):
+                remove_mode = config.get("remove_links_mode", "links_only")
+                if remove_mode == "whole_text":
+                    if re.search(magnet_pattern, processed_text, flags=re.MULTILINE | re.IGNORECASE):
+                        processed_text = ""
+                        logging.info(f"🧲 磁力链接过滤: 文本包含磁力链接，整个文本被移除")
+                else:
+                    processed_text = re.sub(magnet_pattern, '', processed_text, flags=re.MULTILINE | re.IGNORECASE)
+                    logging.info(f"🧲 磁力链接过滤: 只移除磁力链接，保留其他文本")
         
         # 移除用户名
         if config.get("remove_usernames", False):
@@ -1413,8 +1467,10 @@ async def example_usage():
     
     # 配置
     config = {
-                    "remove_links": False,
-            "remove_links_mode": "links_only",  # links_only | whole_text
+        "remove_links": False,
+        "remove_links_mode": "links_only",  # links_only | whole_text
+        "remove_all_links": False,  # 新增：移除所有类型链接
+        "remove_magnet_links": False,  # 新增：移除磁力链接
         "buttons": [
             {"text": "联系客服", "url": "@support_bot"}
         ]
