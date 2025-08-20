@@ -1009,66 +1009,118 @@ def cleanup_media_group_status(media_group_id):
         media_group_processing_locks.pop(media_group_id, None)
 
 def _is_media_group_complete(messages):
-    """检查媒体组是否完整（修复策略：更合理的触发条件，避免拆分）"""
+    """检查媒体组是否完整（修复策略：更保守的触发条件，确保完整性）"""
     if len(messages) < 2:
         return False
     
     # 按ID排序检查连续性
     sorted_messages = sorted(messages, key=lambda m: m.id)
     
-    # 🔧 修复：降低触发门槛，适应大部分媒体组（2-3个文件的情况）
-    if len(sorted_messages) >= 2:  # 从5降到2，避免小媒体组被过期清理抢夺
+    # 🔧 修复：提高触发门槛，确保媒体组完整
+    if len(sorted_messages) >= 3:  # 至少3条消息才考虑完整性检查
         max_gap = 0
         for i in range(1, len(sorted_messages)):
             gap = sorted_messages[i].id - sorted_messages[i-1].id
             max_gap = max(max_gap, gap)
         
-        # 🔧 修复：更宽松的完整性判断，允许更大ID间隔
-        if max_gap <= 3:  # 从2增加到3，适应Telegram的消息ID分配模式
+        # 🔧 修复：更严格的完整性判断，ID必须连续或间隔很小
+        if max_gap <= 1:  # 只有ID完全连续才认为完整
             first_time = getattr(sorted_messages[0], 'date', None)
             last_time = getattr(sorted_messages[-1], 'date', None)
             if first_time and last_time:
                 time_diff = (last_time - first_time).total_seconds()
-                # 🔧 修复：快速响应，从8秒降到3秒
-                if time_diff > 3:
+                # 🔧 修复：增加时间差要求，确保媒体组发送完毕
+                if time_diff > 8:  # 从3秒增加到8秒
                     return True
     
-    # 🔧 修复：更早的超时触发，避免与清理线程冲突
+    # 🔧 修复：大幅增加超时时间，给媒体组足够的收集时间
     if len(sorted_messages) >= 1:
         first_time = getattr(sorted_messages[0], 'date', None)
         if first_time:
             time_diff = time.time() - first_time.timestamp()
-            # 🔧 修复：从15秒大幅降到5秒，在清理线程之前就处理
-            if time_diff > 5:
+            # 🔧 修复：从5秒增加到15秒，确保大媒体组有足够时间
+            if time_diff > 15:
                 return True
     
     return False  # 默认认为不完整，继续等待
 
 def parse_channel_identifier(raw: str):
     s = (raw or "").strip()
+    
     # 纯数字或以 -100 开头
     if s.startswith("-100") and s[4:].isdigit():
         return int(s)
     if s.isdigit():
-        # 可能是内部 id
-        return int(s)
+        # 可能是内部 id，优先尝试 -100 前缀格式
+        try:
+            # 对于私密频道，优先使用 -100 前缀
+            prefixed_id = int(f"-100{s}")
+            logging.info(f"纯数字ID: 构造前缀ID {prefixed_id}")
+            return prefixed_id
+        except ValueError as e:
+            logging.warning(f"构造前缀ID失败: {e}")
+            # 如果失败，返回原始数字
+            return int(s)
+    
     # @username
     if s.startswith('@'):
         return s[1:]
+    
     # URL
     if s.startswith('http://') or s.startswith('https://') or s.startswith('t.me/'):
         if s.startswith('t.me/'):
             s = 'https://' + s
+        
         u = urlparse(s)
         path = u.path.strip('/')
         parts = path.split('/') if path else []
+        
         if not parts:
             return s
+            
         if parts[0] == 'c' and len(parts) >= 2 and parts[1].isdigit():
-            # 私有频道内部 id
-            return int(f"-100{parts[1]}")
+            # 私有频道内部 id - 尝试多种格式
+            channel_id = parts[1]
+            logging.info(f"解析私密频道ID: 原始ID={channel_id}")
+            
+            # 方法1：直接使用原始数字ID
+            try:
+                logging.info(f"尝试方法1: 直接使用数字ID {channel_id}")
+                return int(channel_id)
+            except ValueError as e:
+                logging.warning(f"方法1失败: {e}")
+            
+            # 方法2：构造 -100 前缀的ID
+            try:
+                prefixed_id = f"-100{channel_id}"
+                logging.info(f"尝试方法2: 构造前缀ID {prefixed_id}")
+                return int(prefixed_id)
+            except ValueError as e:
+                logging.warning(f"方法2失败: {e}")
+            
+            # 方法3：尝试其他可能的格式
+            try:
+                # 有些私密频道可能使用不同的前缀
+                alternative_id = f"-1001{channel_id}"
+                logging.info(f"尝试方法3: 替代前缀ID {alternative_id}")
+                return int(alternative_id)
+            except ValueError as e:
+                logging.warning(f"方法3失败: {e}")
+            
+            # 方法4：如果都失败，尝试构造 -100 前缀的ID作为最后的尝试
+            try:
+                final_prefixed_id = int(f"-100{channel_id}")
+                logging.info(f"方法4: 最终尝试构造前缀ID {final_prefixed_id}")
+                return final_prefixed_id
+            except ValueError as e:
+                logging.warning(f"方法4失败: {e}")
+                # 如果所有方法都失败，返回原始数字字符串，让Telegram API自己处理
+                logging.info(f"所有方法都失败，返回原始ID字符串: {channel_id}")
+                return channel_id
+        
         # 普通公开频道用户名
         return parts[0]
+    
     # 默认返回原始字符串，交由 get_chat 解析
     return s
 
@@ -1175,29 +1227,35 @@ async def cooperative_sleep(task_obj: dict, seconds: int):
 
 # ==================== 持久化函数 ====================
 def save_configs():
-    """将用户配置保存到文件和Firebase"""
-    # 1. 保存到本地文件（作为备份）
-    config_file = f"data/user_configs_{bot_config['bot_id']}.json"
+    """保存配置到文件"""
     try:
-        # 确保data目录存在
-        os.makedirs("data", exist_ok=True)
-        with open(config_file, "w", encoding='utf-8') as f:
-            json.dump(user_configs, f, ensure_ascii=False, indent=4)
-        logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到本地文件 {config_file}")
+        logging.info("正在保存用户配置...")
+        # 1. 保存到本地文件（作为备份）
+        config_file = f"data/user_configs_{bot_config['bot_id']}.json"
+        try:
+            # 确保data目录存在
+            os.makedirs("data", exist_ok=True)
+            with open(config_file, "w", encoding='utf-8') as f:
+                json.dump(user_configs, f, ensure_ascii=False, indent=4)
+            logging.info(f"[{bot_config['bot_id']}] 用户配置已保存到本地文件 {config_file}")
+        except Exception as e:
+            logging.error(f"[{bot_config['bot_id']}] 保存本地配置文件失败: {e}")
+        
+        # 2. 尝试保存到Firebase
+        try:
+            from firebase_storage import save_configs_to_firebase
+            if save_configs_to_firebase(bot_config['bot_id'], user_configs):
+                logging.info(f"[{bot_config['bot_id']}] 用户配置已成功保存到Firebase")
+            else:
+                logging.warning(f"[{bot_config['bot_id']}] Firebase保存失败，仅使用本地存储")
+        except ImportError:
+            logging.info(f"[{bot_config['bot_id']}] Firebase模块未安装，仅使用本地存储")
+        except Exception as e:
+            logging.warning(f"[{bot_config['bot_id']}] Firebase保存异常: {e}，仅使用本地存储")
+        
+        logging.info("用户配置保存成功")
     except Exception as e:
-        logging.error(f"[{bot_config['bot_id']}] 保存本地配置文件失败: {e}")
-    
-    # 2. 尝试保存到Firebase
-    try:
-        from firebase_storage import save_configs_to_firebase
-        if save_configs_to_firebase(bot_config['bot_id'], user_configs):
-            logging.info(f"[{bot_config['bot_id']}] 用户配置已成功保存到Firebase")
-        else:
-            logging.warning(f"[{bot_config['bot_id']}] Firebase保存失败，仅使用本地存储")
-    except ImportError:
-        logging.info(f"[{bot_config['bot_id']}] Firebase模块未安装，仅使用本地存储")
-    except Exception as e:
-        logging.warning(f"[{bot_config['bot_id']}] Firebase保存异常: {e}，仅使用本地存储")
+        logging.error(f"保存配置失败: {e}")
 
 def load_configs():
     """从文件或Firebase载入用户配置"""
@@ -1235,7 +1293,7 @@ def ensure_user_config_exists(user_id):
         user_configs[user_id_str] = {
             "channel_pairs": [],
             "remove_links": False,
-        "remove_links_mode": "links_only",  # links_only | whole_text
+            "remove_links_mode": "links_only",  # links_only | whole_text
             "remove_magnet_links": False,  # 新增：移除磁力链接
             "remove_all_links": False,     # 新增：移除所有类型链接
             "remove_hashtags": False,
@@ -1243,6 +1301,18 @@ def ensure_user_config_exists(user_id):
             "filter_photo": False,
             "filter_video": False,
             "filter_buttons": False,
+            # 新增：评论区搬运控制
+            "enable_comment_forwarding": False,  # 默认关闭评论区搬运
+            # 新增：只搬运频道主信息
+            "channel_owner_only": False,  # 默认关闭，搬运所有用户信息
+            # 新增：只搬运媒体内容
+            "media_only_mode": False,  # 默认关闭，搬运所有类型内容
+            # 新增：评论区调试设置
+            "comment_debug": False,  # 默认关闭调试模式
+            "comment_test_mode": False,  # 默认关闭测试模式
+            "comment_fetch_strategy": "aggressive",  # 默认使用激进策略
+            "comment_detection_mode": "smart",  # 默认使用智能识别
+            "manual_comment_message_ids": [],  # 手动指定的消息ID列表
             "realtime_listen": False,
             "tail_text": "",
             "tail_position": "none",
@@ -1407,6 +1477,10 @@ def get_edit_channel_pair_menu(pair_id, current_pair):
 
 
 def get_clone_confirm_buttons(task_id, clone_tasks):
+    # 修复：确保 clone_tasks 是列表类型
+    if not isinstance(clone_tasks, list):
+        clone_tasks = []
+    
     buttons = [
         [InlineKeyboardButton(f"✅ 确认开始搬运 ({len(clone_tasks)} 组频道)", callback_data=f"confirm_clone_action:{task_id}")],
         [InlineKeyboardButton("❌ 取消", callback_data=f"cancel:{task_id}")]
@@ -1418,10 +1492,20 @@ def get_clone_confirm_buttons(task_id, clone_tasks):
 def get_feature_config_menu(user_id):
     config = user_configs.get(str(user_id), {})
     
-    keywords_count = len(config.get("filter_keywords", []))
-    replacements_count = len(config.get("replacement_words", {}))
-    ext_count = len(config.get("file_filter_extensions", []))
-    buttons_count = len(config.get("buttons", []))
+    # 添加调试日志
+    logging.info(f"获取用户 {user_id} 的功能配置菜单")
+    logging.info(f"用户配置: {config}")
+    
+    # 添加类型检查，防止配置值类型错误
+    filter_keywords = config.get("filter_keywords", [])
+    replacement_words = config.get("replacement_words", {})
+    file_extensions = config.get("file_filter_extensions", [])
+    buttons = config.get("buttons", [])
+    
+    keywords_count = len(filter_keywords) if isinstance(filter_keywords, (list, tuple)) else 0
+    replacements_count = len(replacement_words) if isinstance(replacement_words, dict) else 0
+    ext_count = len(file_extensions) if isinstance(file_extensions, (list, tuple)) else 0
+    buttons_count = len(buttons) if isinstance(buttons, (list, tuple)) else 0
     
     # 获取各功能状态指示器
     content_removal_status = "🟢" if any([
@@ -1438,6 +1522,11 @@ def get_feature_config_menu(user_id):
     
     button_filter_status = "🟢" if config.get("filter_buttons") else "⚫"
     
+    # 新增状态指示器
+    comment_forwarding_status = "🟢" if config.get("enable_comment_forwarding") else "⚫"
+    channel_owner_only_status = "🟢" if config.get("channel_owner_only") else "⚫"
+    media_only_status = "🟢" if config.get("media_only_mode") else "⚫"
+    
     tail_text_status = "🟢" if config.get("tail_text") else "⚫"
     
     buttons = [
@@ -1451,6 +1540,19 @@ def get_feature_config_menu(user_id):
             InlineKeyboardButton(f"{content_removal_status} 文本内容移除", callback_data="toggle_content_removal"),
             InlineKeyboardButton(f"{file_filter_status} 文件过滤设定 ({ext_count})", callback_data="manage_file_filter")
         ],
+        
+        # 🎯 搬运控制区域 (新增)
+        [InlineKeyboardButton("🎯 **搬运控制设置**", callback_data="forwarding_control_header")],
+        [
+            InlineKeyboardButton(f"{comment_forwarding_status} 评论区搬运", callback_data="toggle_comment_forwarding"),
+            InlineKeyboardButton(f"{channel_owner_only_status} 只搬运频道主", callback_data="toggle_channel_owner_only")
+        ],
+        [
+            InlineKeyboardButton(f"{media_only_status} 只搬运视频图片", callback_data="toggle_media_only_mode")
+        ],
+        
+        # 🔍 评论区调试设置 (新增)
+        [InlineKeyboardButton("🔍 **评论区调试设置**", callback_data="comment_debug_settings")],
         
         # 🎛️ 按钮和界面控制
         [InlineKeyboardButton("🎛️ **按钮和界面控制**", callback_data="button_control_header")],
@@ -1553,6 +1655,12 @@ HELP_TEXT = """
 # ==================== 辅助函数 ====================
 def find_task(user_id, task_id=None, state=None):
     """根据 task_id 或 state 寻找特定任务"""
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"find_task: user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
     user_tasks = user_states.get(user_id, [])
     if task_id:
         return next((task for task in user_tasks if task.get("task_id") == task_id), None)
@@ -1564,6 +1672,12 @@ def find_task(user_id, task_id=None, state=None):
 
 def remove_task(user_id, task_id):
     """从任务列表中移除一个任务"""
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"remove_task: user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
     if user_id in user_states:
         user_states[user_id] = [task for task in user_states[user_id] if task.get("task_id") != task_id]
         if not user_states[user_id]:
@@ -1835,7 +1949,8 @@ async def show_file_filter_menu(message, user_id):
     config = user_configs.get(str(user_id), {})
     
     # 统计文件扩展名过滤数量
-    ext_count = len(config.get("file_filter_extensions", []))
+    file_extensions = config.get("file_filter_extensions", [])
+    ext_count = len(file_extensions) if isinstance(file_extensions, (list, tuple)) else 0
     
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"📁 副档名过滤 ({ext_count}个)", callback_data="manage_file_extension_filter")],
@@ -2155,6 +2270,350 @@ async def set_button_probability(message, user_id, task):
     except ValueError:
         await message.reply_text("❌ 请输入有效的数字。")
 
+# 新增：处理评论区搬运开关
+async def toggle_comment_forwarding(message, user_id):
+    """切换评论区搬运功能"""
+    logging.info(f"toggle_comment_forwarding 被调用: user_id={user_id}")
+    config = user_configs.get(str(user_id), {})
+    current_status = config.get("enable_comment_forwarding", False)
+    config["enable_comment_forwarding"] = not current_status
+    
+    # 🔧 新增：启用评论区搬运时自动启用调试模式
+    if config["enable_comment_forwarding"]:
+        config["comment_debug"] = True
+        config["comment_fetch_strategy"] = "aggressive"
+        config["comment_detection_mode"] = "smart"
+        config["comment_test_mode"] = False
+        logging.info(f"用户 {user_id} 启用评论区搬运，自动启用调试模式")
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if config["enable_comment_forwarding"] else "❌ 关闭"
+    debug_status = "✅ 已启用" if config.get("comment_debug", False) else "❌ 未启用"
+    
+    text = f"🎯 **评论区搬运设置**\n\n"
+    text += f"📋 **当前状态**: {status_text}\n"
+    text += f"🔍 **调试模式**: {debug_status}\n\n"
+    
+    if config["enable_comment_forwarding"]:
+        text += "💡 **说明**: 现在将搬运频道评论区的内容。\n"
+        text += "🔍 **调试信息**: 已自动启用调试模式，搬运时会显示详细日志。\n"
+        text += "⚠️ **注意**: 源频道必须开启评论功能才能获取评论区内容。\n\n"
+        text += "**🎯 当前配置**:\n"
+        text += f"• 识别模式: {config.get('comment_detection_mode', 'smart')}\n"
+        text += f"• 获取策略: {config.get('comment_fetch_strategy', 'aggressive')}\n"
+        text += f"• 测试模式: {'开启' if config.get('comment_test_mode', False) else '关闭'}\n\n"
+        text += "**📋 使用建议**:\n"
+        text += "• 如果评论区搬运不成功，请查看详细日志\n"
+        text += "• 可以手动指定有评论的消息ID (如89, 97)\n"
+        text += "• 确保机器人有访问评论的权限"
+    else:
+        text += "💡 **说明**: 现在只搬运频道主发布的内容，不搬运评论区。"
+    
+    buttons = [
+        [InlineKeyboardButton("🔙 返回功能设定", callback_data="show_feature_config_menu")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+# 新增：处理只搬运频道主开关
+async def toggle_channel_owner_only(message, user_id):
+    """切换只搬运频道主功能"""
+    logging.info(f"toggle_channel_owner_only 被调用: user_id={user_id}")
+    config = user_configs.get(str(user_id), {})
+    current_status = config.get("channel_owner_only", False)
+    config["channel_owner_only"] = not current_status
+    save_configs()
+    
+    status_text = "✅ 开启" if config["channel_owner_only"] else "❌ 关闭"
+    text = f"👑 **只搬运频道主设置**\n\n"
+    text += f"📋 **当前状态**: {status_text}\n\n"
+    
+    if config["channel_owner_only"]:
+        text += "💡 **说明**: 现在只搬运频道主发布的内容。\n"
+        text += "🚫 **过滤**: 其他用户的消息将被过滤掉。"
+    else:
+        text += "💡 **说明**: 现在搬运所有用户的内容，包括频道主和其他用户。"
+    
+    buttons = [
+        [InlineKeyboardButton("🔙 返回功能设定", callback_data="show_feature_config_menu")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+# 新增：处理只搬运媒体开关
+async def toggle_media_only_mode(message, user_id):
+    """切换只搬运视频图片功能"""
+    logging.info(f"toggle_media_only_mode 被调用: user_id={user_id}")
+    config = user_configs.get(str(user_id), {})
+    current_status = config.get("media_only_mode", False)
+    config["media_only_mode"] = not current_status
+    save_configs()
+    
+    status_text = "✅ 开启" if config["media_only_mode"] else "❌ 关闭"
+    text = f"🎬 **只搬运视频图片设置**\n\n"
+    text += f"📋 **当前状态**: {status_text}\n\n"
+    
+    if config["media_only_mode"]:
+        text += "💡 **说明**: 现在只搬运包含视频或图片的消息。\n"
+        text += "🚫 **过滤**: 纯文本消息将被过滤掉。\n"
+        text += "📋 **包含**: 图片、视频、图片+文字、视频+文字的消息。"
+    else:
+        text += "💡 **说明**: 现在搬运所有类型的内容，包括文本、图片、视频等。"
+    
+    buttons = [
+        [InlineKeyboardButton("🔙 返回功能设定", callback_data="show_feature_config_menu")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+# 新增：评论区调试设置
+async def show_comment_debug_settings(message, user_id):
+    """显示评论区调试设置"""
+    # 确保用户配置存在
+    ensure_user_config_exists(user_id)
+    
+    user_id_str = str(user_id)
+    config = user_configs[user_id_str]
+    
+    # 获取当前设置状态
+    comment_debug = config.get("comment_debug", False)
+    comment_test_mode = config.get("comment_test_mode", False)
+    comment_fetch_strategy = config.get("comment_fetch_strategy", "aggressive")
+    comment_detection_mode = config.get("comment_detection_mode", "smart")
+    manual_comment_ids = config.get("manual_comment_message_ids", [])
+    
+    text = f"🔍 **评论区调试设置**\n\n"
+    text += f"**🔧 调试开关**:\n"
+    text += f"🔍 调试模式: {'✅ 开启' if comment_debug else '❌ 关闭'}\n"
+    text += f"🧪 测试模式: {'✅ 开启' if comment_test_mode else '❌ 关闭'}\n\n"
+    
+    text += f"**🎯 识别策略**:\n"
+    text += f"📝 识别模式: {comment_detection_mode}\n"
+    text += f"🔍 获取策略: {comment_fetch_strategy}\n\n"
+    
+    if comment_detection_mode == "manual" and manual_comment_ids:
+        text += f"**📋 手动指定消息ID**:\n"
+        text += f"🎯 消息ID列表: {', '.join(map(str, manual_comment_ids))}\n\n"
+    
+    text += "**💡 使用说明**:\n"
+    text += "• 调试模式：显示详细的评论获取过程\n"
+    text += "• 测试模式：尝试所有评论获取方法\n"
+    text += "• 识别模式：选择如何识别有评论的消息\n"
+    text += "• 获取策略：选择评论获取的激进程度\n\n"
+    
+    text += "**⚠️ 注意事项**:\n"
+    text += "• 必须先开启评论区搬运功能\n"
+    text += "• 调试模式会产生较多日志\n"
+    text += "• 手动模式需要指定具体的消息ID"
+    
+    buttons = [
+        [InlineKeyboardButton(f"{'✅' if comment_debug else '❌'} 调试模式", callback_data="toggle_comment_debug")],
+        [InlineKeyboardButton(f"{'✅' if comment_test_mode else '❌'} 测试模式", callback_data="toggle_comment_test_mode")],
+        [InlineKeyboardButton("🎯 识别模式设置", callback_data="set_comment_detection_mode")],
+        [InlineKeyboardButton("🔍 获取策略设置", callback_data="set_comment_fetch_strategy")],
+        [InlineKeyboardButton("📋 手动指定消息ID", callback_data="set_manual_comment_ids")],
+        [InlineKeyboardButton("🧪 测试按钮响应", callback_data="test_button_response")],
+        [InlineKeyboardButton("🔙 返回功能设定", callback_data="show_feature_config_menu")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+# 评论区调试设置处理函数
+async def toggle_comment_debug(message, user_id):
+    """切换评论区调试模式"""
+    # 确保用户配置存在
+    ensure_user_config_exists(user_id)
+    
+    user_id_str = str(user_id)
+    current_status = user_configs[user_id_str].get("comment_debug", False)
+    user_configs[user_id_str]["comment_debug"] = not current_status
+    save_configs()
+    
+    status_text = "✅ 开启" if config["comment_debug"] else "❌ 关闭"
+    text = f"🔍 **评论区调试模式设置**\n\n"
+    text += f"📋 **当前状态**: {status_text}\n\n"
+    
+    if config["comment_debug"]:
+        text += "💡 **说明**: 调试模式已开启，搬运时会显示详细的评论获取过程。\n"
+        text += "📊 **日志内容**:\n"
+        text += "• 评论识别过程\n"
+        text += "• 评论获取方法\n"
+        text += "• 成功/失败统计\n"
+        text += "• 错误诊断信息\n\n"
+        text += "⚠️ **注意**: 调试模式会产生较多日志，建议在测试时使用。"
+    else:
+        text += "💡 **说明**: 调试模式已关闭，搬运时只显示基本信息。"
+    
+    try:
+        # 尝试编辑消息
+        await safe_edit_or_reply(message, text, 
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")
+            ]]))
+    except Exception as e:
+        logging.error(f"编辑消息失败，尝试发送新消息: {e}")
+        # 如果编辑失败，尝试发送新消息
+        try:
+            await message.reply_text(text, 
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")
+                ]]))
+        except Exception as reply_e:
+            logging.error(f"发送新消息也失败: {reply_e}")
+            # 最后尝试简单回复
+            await message.reply_text("⚠️ 设置已保存，但显示失败。请重新进入调试设置。")
+
+async def toggle_comment_test_mode(message, user_id):
+    """切换评论区测试模式"""
+    # 确保用户配置存在
+    ensure_user_config_exists(user_id)
+    
+    user_id_str = str(user_id)
+    current_status = user_configs[user_id_str].get("comment_test_mode", False)
+    user_configs[user_id_str]["comment_test_mode"] = not current_status
+    save_configs()
+    
+    status_text = "✅ 开启" if config["comment_test_mode"] else "❌ 关闭"
+    text = f"🧪 **评论区测试模式设置**\n\n"
+    text += f"📋 **当前状态**: {status_text}\n\n"
+    
+    if config["comment_test_mode"]:
+        text += "💡 **说明**: 测试模式已开启，系统将尝试所有评论获取方法。\n"
+        text += "🔍 **测试内容**:\n"
+        text += "• 方法1: 直接获取回复\n"
+        text += "• 方法2: 关键词搜索\n"
+        text += "• 方法3: ID推测\n"
+        text += "• 方法4: 权限检查\n\n"
+        text += "⚠️ **注意**: 测试模式会消耗更多API调用，建议谨慎使用。"
+    else:
+        text += "💡 **说明**: 测试模式已关闭，使用标准评论获取策略。"
+    
+    try:
+        # 尝试编辑消息
+        await safe_edit_or_reply(message, text, 
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")
+            ]]))
+    except Exception as e:
+        logging.error(f"编辑消息失败，尝试发送新消息: {e}")
+        # 如果编辑失败，尝试发送新消息
+        try:
+            await message.reply_text(text, 
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")
+                ]]))
+        except Exception as reply_e:
+            logging.error(f"发送新消息也失败: {reply_e}")
+            # 最后尝试简单回复
+            await message.reply_text("⚠️ 设置已保存，但显示失败。请重新进入调试设置。")
+
+async def set_comment_detection_mode(message, user_id):
+    """设置评论识别模式"""
+    # 确保用户配置存在
+    ensure_user_config_exists(user_id)
+    
+    user_id_str = str(user_id)
+    config = user_configs[user_id_str]
+    current_mode = config.get("comment_detection_mode", "smart")
+    
+    text = f"🎯 **评论识别模式设置**\n\n"
+    text += f"📋 **当前模式**: {current_mode}\n\n"
+    text += "**🔍 模式说明**:\n"
+    text += "• **smart**: 智能识别（推荐）\n"
+    text += "  - 自动识别长文本、媒体、按钮等可能有评论的消息\n"
+    text += "  - 平衡性能和准确性\n\n"
+    text += "• **aggressive**: 激进识别\n"
+    text += "  - 检查所有消息的回复信息\n"
+    text += "  - 最全面但可能较慢\n\n"
+    text += "• **manual**: 手动指定\n"
+    text += "  - 只处理用户指定的消息ID\n"
+    text += "  - 最精确，性能最好\n\n"
+    text += "**💡 推荐**: 首次使用建议选择 smart 模式"
+    
+    buttons = [
+        [InlineKeyboardButton(f"{'✅' if current_mode == 'smart' else '⚪'} 智能识别 (smart)", callback_data="set_comment_detection_mode:smart")],
+        [InlineKeyboardButton(f"{'✅' if current_mode == 'aggressive' else '⚪'} 激进识别 (aggressive)", callback_data="set_comment_detection_mode:aggressive")],
+        [InlineKeyboardButton(f"{'✅' if current_mode == 'manual' else '⚪'} 手动指定 (manual)", callback_data="set_comment_detection_mode:manual")],
+        [InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+async def set_comment_fetch_strategy(message, user_id):
+    """设置评论获取策略"""
+    # 确保用户配置存在
+    ensure_user_config_exists(user_id)
+    
+    user_id_str = str(user_id)
+    config = user_configs[user_id_str]
+    current_strategy = config.get("comment_fetch_strategy", "aggressive")
+    
+    text = f"🔍 **评论获取策略设置**\n\n"
+    text += f"📋 **当前策略**: {current_strategy}\n\n"
+    text += "**🎯 策略说明**:\n"
+    text += "• **smart**: 智能策略（推荐）\n"
+    text += "  - 先尝试最可靠的方法\n"
+    text += "  - 失败时自动尝试备选方法\n"
+    text += "  - 平衡成功率和性能\n\n"
+    text += "• **aggressive**: 激进策略\n"
+    text += "  - 尝试所有可能的获取方法\n"
+    text += "  - 成功率最高但消耗更多API\n"
+    text += "  - 适合重要内容的搬运\n\n"
+    text += "• **conservative**: 保守策略\n"
+    text += "  - 只使用最可靠的方法\n"
+    text += "  - 性能最好但可能错过一些评论\n"
+    text += "  - 适合批量搬运\n\n"
+    text += "**💡 推荐**: 首次使用建议选择 aggressive 策略"
+    
+    buttons = [
+        [InlineKeyboardButton(f"{'✅' if current_strategy == 'smart' else '⚪'} 智能策略 (smart)", callback_data="set_comment_fetch_strategy:smart")],
+        [InlineKeyboardButton(f"{'✅' if current_strategy == 'aggressive' else '⚪'} 激进策略 (aggressive)", callback_data="set_comment_fetch_strategy:aggressive")],
+        [InlineKeyboardButton(f"{'✅' if current_strategy == 'conservative' else '⚪'} 保守策略 (conservative)", callback_data="set_comment_fetch_strategy:conservative")],
+        [InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+async def set_manual_comment_ids(message, user_id):
+    """设置手动指定的评论消息ID"""
+    # 确保用户配置存在
+    ensure_user_config_exists(user_id)
+    
+    user_id_str = str(user_id)
+    config = user_configs[user_id_str]
+    current_ids = config.get("manual_comment_message_ids", [])
+    
+    text = f"📋 **手动指定评论消息ID设置**\n\n"
+    text += f"📋 **当前指定ID**: {', '.join(map(str, current_ids)) if current_ids else '无'}\n\n"
+    text += "**💡 使用说明**:\n"
+    text += "• 此功能仅在识别模式为 'manual' 时生效\n"
+    text += "• 输入格式：单个ID或多个ID用逗号分隔\n"
+    text += "• 例如：89 或 89,97,100\n\n"
+    text += "**🎯 推荐用法**:\n"
+    text += "• 如果您知道具体哪些消息有评论\n"
+    text += "• 可以精确指定这些消息ID\n"
+    text += "• 提高搬运效率和准确性\n\n"
+    text += "**⚠️ 注意事项**:\n"
+    text += "• ID必须是数字\n"
+    text += "• 多个ID用逗号分隔\n"
+    text += "• 确保机器人有访问这些消息的权限"
+    
+    # 创建任务等待用户输入
+    task_id = str(uuid.uuid4())
+    new_task = {"task_id": task_id, "state": "waiting_for_manual_comment_ids"}
+    if user_id not in user_states: user_states[user_id] = []
+    user_states[user_id].append(new_task)
+    save_user_states()
+    
+    buttons = [
+        [InlineKeyboardButton("✏️ 输入消息ID", callback_data=f"set_manual_comment_ids:{task_id}")],
+        [InlineKeyboardButton("🗑️ 清空当前ID", callback_data="set_manual_comment_ids:clear")],
+        [InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
 # ==================== FloodWait管理命令 ====================
 async def fix_floodwait_now(message, user_id):
     """立即修复所有异常的FloodWait限制"""
@@ -2247,6 +2706,9 @@ async def start_command(client, message):
     logging.info(f"用户 {user_id} 启动机器人。")
     
     # 登录检查已移除，所有用户可直接使用
+    
+    # 确保用户配置存在
+    ensure_user_config_exists(user_id)
     
     # 获取用户名用于欢迎消息
     username = f"用户{user_id}"
@@ -2359,6 +2821,13 @@ async def callback_handler(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
     
+    # 添加详细的调试日志
+    logging.info(f"=== 回调处理开始 ===")
+    logging.info(f"用户ID: {user_id}")
+    logging.info(f"回调数据: '{data}'")
+    logging.info(f"回调数据类型: {type(data)}")
+    logging.info(f"回调数据长度: {len(data)}")
+    
     # 登录系统已移除，所有用户可直接使用
     logging.info(f"用户 {user_id} 点击了回调按钮: {data}")
     
@@ -2370,10 +2839,13 @@ async def callback_handler(client, callback_query):
         # 继续处理，不因为应答失败而中断
 
     if data == "show_main_menu":
+        logging.info("匹配到: show_main_menu")
         await show_main_menu(callback_query.message, user_id)
     elif data == "show_channel_config_menu":
+        logging.info("匹配到: show_channel_config_menu")
         await show_channel_config_menu(callback_query.message, user_id)
     elif data == "show_feature_config_menu":
+        logging.info("匹配到: show_feature_config_menu")
         await show_feature_config_menu(callback_query.message, user_id)
     elif data == "toggle_content_removal":
         await toggle_content_removal_menu(callback_query.message, user_id)
@@ -2662,18 +3134,178 @@ async def callback_handler(client, callback_query):
         await request_button_interval(callback_query.message, user_id)
     elif data.startswith("set_button_probability"):
         await request_button_probability(callback_query.message, user_id)
+    elif data == "toggle_comment_forwarding":
+        logging.info("匹配到: toggle_comment_forwarding")
+        await toggle_comment_forwarding(callback_query.message, user_id)
+    elif data == "toggle_channel_owner_only":
+        logging.info("匹配到: toggle_channel_owner_only")
+        await toggle_channel_owner_only(callback_query.message, user_id)
+    elif data == "toggle_media_only_mode":
+        logging.info("匹配到: toggle_media_only_mode")
+        await toggle_media_only_mode(callback_query.message, user_id)
+    elif data == "comment_debug_settings":
+        logging.info("匹配到: comment_debug_settings")
+        try:
+            await callback_query.answer()  # 先应答回调查询
+            await show_comment_debug_settings(callback_query.message, user_id)
+        except Exception as e:
+            logging.error(f"comment_debug_settings 处理失败: {e}")
+            await callback_query.answer("⚠️ 处理失败，请重试")
+    elif data == "set_comment_detection_mode":
+        logging.info("匹配到: set_comment_detection_mode")
+        try:
+            await callback_query.answer()  # 先应答回调查询
+            await set_comment_detection_mode(callback_query.message, user_id)
+        except Exception as e:
+            logging.error(f"set_comment_detection_mode 处理失败: {e}")
+            await callback_query.answer("⚠️ 处理失败，请重试")
+    elif data == "set_comment_fetch_strategy":
+        logging.info("匹配到: set_comment_fetch_strategy")
+        try:
+            await callback_query.answer()  # 先应答回调查询
+            await set_comment_fetch_strategy(callback_query.message, user_id)
+        except Exception as e:
+            logging.error(f"set_comment_fetch_strategy 处理失败: {e}")
+            await callback_query.answer("⚠️ 处理失败，请重试")
+    elif data == "set_manual_comment_ids":
+        logging.info("匹配到: set_manual_comment_ids")
+        try:
+            await callback_query.answer()  # 先应答回调查询
+            await set_manual_comment_ids(callback_query.message, user_id)
+        except Exception as e:
+            logging.error(f"set_manual_comment_ids 处理失败: {e}")
+            await callback_query.answer("⚠️ 处理失败，请重试")
+    elif data == "test_button_response":
+        logging.info("匹配到: test_button_response")
+        try:
+            await callback_query.answer("🧪 测试按钮响应成功！", show_alert=True)
+            logging.info("测试按钮响应成功")
+        except Exception as e:
+            logging.error(f"test_button_response 处理失败: {e}")
+            await callback_query.answer("⚠️ 测试失败", show_alert=True)
+    elif data == "toggle_comment_debug":
+        logging.info("匹配到: toggle_comment_debug")
+        try:
+            await callback_query.answer()  # 先应答回调查询
+            await toggle_comment_debug(callback_query.message, user_id)
+        except Exception as e:
+            logging.error(f"toggle_comment_debug 处理失败: {e}")
+            await callback_query.answer("⚠️ 处理失败，请重试")
+    elif data == "toggle_comment_test_mode":
+        logging.info("匹配到: toggle_comment_test_mode")
+        try:
+            await callback_query.answer()  # 先应答回调查询
+            await toggle_comment_test_mode(callback_query.message, user_id)
+        except Exception as e:
+            logging.error(f"toggle_comment_test_mode 处理失败: {e}")
+            await callback_query.answer("⚠️ 处理失败，请重试")
+    elif data.startswith("set_comment_detection_mode:"):
+        mode = data.split(':')[1]
+        ensure_user_config_exists(user_id)
+        user_configs[str(user_id)]["comment_detection_mode"] = mode
+        save_configs()
+        await safe_edit_or_reply(callback_query.message, 
+            f"✅ **评论识别模式已设置**\n\n"
+            f"🎯 **当前模式**: {mode}\n\n"
+            f"💡 设置已保存，下次搬运时将使用此模式。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")
+            ]]))
+    elif data.startswith("set_comment_fetch_strategy:"):
+        strategy = data.split(':')[1]
+        ensure_user_config_exists(user_id)
+        user_configs[str(user_id)]["comment_fetch_strategy"] = strategy
+        save_configs()
+        await safe_edit_or_reply(callback_query.message, 
+            f"✅ **评论获取策略已设置**\n\n"
+            f"🔍 **当前策略**: {strategy}\n\n"
+            f"💡 设置已保存，下次搬运时将使用此策略。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")
+            ]]))
+    elif data.startswith("set_manual_comment_ids:"):
+        if data == "set_manual_comment_ids:clear":
+            # 清空手动指定的ID
+            ensure_user_config_exists(user_id)
+            user_configs[str(user_id)]["manual_comment_message_ids"] = []
+            save_configs()
+            await safe_edit_or_reply(callback_query.message, 
+                "✅ **手动指定的评论消息ID已清空**\n\n"
+                "💡 现在将使用自动识别模式。",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 返回调试设置", callback_data="comment_debug_settings")
+                ]]))
+        else:
+            # 输入手动指定的ID
+            task_id = data.split(':')[1]
+            await safe_edit_or_reply(callback_query.message, 
+                "📝 **请输入评论消息ID**\n\n"
+                "**格式说明**:\n"
+                "• 单个ID: 89\n"
+                "• 多个ID: 89,97,100\n"
+                "• 用逗号分隔多个ID\n\n"
+                "**示例**:\n"
+                "`89,97` 或 `100`\n\n"
+                "请直接回复此消息，输入您要指定的消息ID。",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ 取消", callback_data="comment_debug_settings")
+                ]]))
+    elif data.startswith("pair_comment_forwarding:"):
+        pair_id = int(data.split(':')[1])
+        await toggle_pair_comment_forwarding(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_channel_owner_only:"):
+        pair_id = int(data.split(':')[1])
+        await toggle_pair_channel_owner_only(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_media_only_mode:"):
+        pair_id = int(data.split(':')[1])
+        await toggle_pair_media_only_mode(callback_query.message, user_id, pair_id)
+    # 新增：处理频道组过滤设置的回调
+    elif data.startswith("pair_toggle_links:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_links(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_toggle_magnet_links:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_magnet_links(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_toggle_all_links:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_all_links(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_toggle_hashtags:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_hashtags(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_toggle_usernames:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_usernames(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_toggle_photo:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_photo(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_toggle_video:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_video(callback_query.message, user_id, pair_id)
+    elif data.startswith("pair_toggle_filter_buttons:"):
+        pair_id = int(data.split(':')[1])
+        await pair_toggle_filter_buttons(callback_query.message, user_id, pair_id)
     elif data == "monitor_pair_disabled":
         # 已暂停的频道组按钮，显示提示
         try:
             await callback_query.answer("⏸ 该频道组已暂停，无法操作", show_alert=True)
         except Exception as e:
             logging.warning(f"回调查询应答失败: {e}")
-    elif data in ["filter_settings_header", "button_control_header", "content_enhancement_header"]:
+    elif data in ["filter_settings_header", "button_control_header", "content_enhancement_header", "forwarding_control_header"]:
         # 标题按钮，无需操作
         try:
             await callback_query.answer("ℹ️ 这是功能分类标题", show_alert=False)
         except Exception as e:
             logging.warning(f"回调查询应答失败: {e}")
+    
+    # 新增：处理未匹配的回调数据
+    else:
+        logging.warning(f"未处理的回调数据: '{data}' (用户: {user_id})")
+        try:
+            await callback_query.answer("⚠️ 未知操作，请重试", show_alert=True)
+        except Exception as e:
+            logging.warning(f"回调查询应答失败: {e}")
+    
+    logging.info(f"=== 回调处理结束 ===")
     
     # 全局异常处理
     try:
@@ -2928,6 +3560,56 @@ async def handle_text_input(client, message):
         logging.info(f"用户 {user_id} 的当前状态: {user_states.get(user_id, [])}")
 
     if not last_task:
+        # 检查是否有等待输入手动评论ID的任务
+        if user_id in user_states:
+            for task in user_states[user_id]:
+                if task.get("state") == "waiting_for_manual_comment_ids":
+                    try:
+                        # 解析用户输入的消息ID
+                        ids_text = message.text.strip()
+                        if not ids_text:
+                            await message.reply_text("❌ 请输入有效的消息ID。")
+                            return
+                        
+                        # 解析ID列表
+                        comment_ids = []
+                        for id_str in ids_text.split(','):
+                            id_str = id_str.strip()
+                            try:
+                                comment_id = int(id_str)
+                                if comment_id > 0:
+                                    comment_ids.append(comment_id)
+                            except ValueError:
+                                continue
+                        
+                        if not comment_ids:
+                            await message.reply_text("❌ 未找到有效的消息ID。请确保输入的是数字，多个ID用逗号分隔。")
+                            return
+                        
+                        # 保存设置
+                        config = user_configs.get(str(user_id), {})
+                        config["manual_comment_message_ids"] = comment_ids
+                        config["comment_detection_mode"] = "manual"  # 自动切换到手动模式
+                        save_configs()
+                        
+                        # 移除任务
+                        user_states[user_id].remove(task)
+                        save_user_states()
+                        
+                        await message.reply_text(
+                            f"✅ **手动评论消息ID设置成功**\n\n"
+                            f"🎯 **已指定ID**: {', '.join(map(str, comment_ids))}\n"
+                            f"📝 **识别模式**: 已自动切换到 manual\n\n"
+                            f"💡 下次搬运时将只处理这些指定消息的评论。",
+                            reply_markup=get_main_menu_buttons(user_id)
+                        )
+                        return
+                        
+                    except Exception as e:
+                        logging.error(f"处理手动评论ID输入失败: {e}")
+                        await message.reply_text("❌ 处理输入时出现错误，请重试。")
+                        return
+        
         # 避免重复发送相同内容
         try:
             await message.reply_text("请先从菜单中选择操作。", reply_markup=get_main_menu_buttons(user_id))
@@ -3074,17 +3756,17 @@ async def listen_and_clone(client, message):
                         messages = listen_media_groups[key]
                         should_process = False
                         
-                        # 🔧 调整：更积极的处理策略，避免媒体组被拆分
+                        # 🔧 调整：更保守的处理策略，确保媒体组完整
                         if _is_media_group_complete(messages):
                             should_process = True
                             logging.info(f"🔍 媒体组 {message.media_group_id} 确认完整({len(messages)}条)，立即处理")
-                        elif len(messages) >= 10:  # 从20降到10
+                        elif len(messages) >= 20:  # 从10增加到20，避免大媒体组被强制处理
                             should_process = True
                             logging.info(f"🔍 媒体组 {message.media_group_id} 消息数过多({len(messages)}条)，强制处理")
-                        elif len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 5:
-                            # 🔧 从10秒降至5秒，先于清理线程
+                        elif len(messages) >= 1 and time.time() - getattr(messages[0], 'date', time.time()).timestamp() > 15:
+                            # 🔧 从5秒增加到15秒，给媒体组足够的收集时间
                             should_process = True
-                            logging.info(f"🔍 媒体组 {message.media_group_id} 等待超时({len(messages)}条，5秒)，强制处理")
+                            logging.info(f"🔍 媒体组 {message.media_group_id} 等待超时({len(messages)}条，15秒)，强制处理")
                         
                         if not should_process:
                             logging.debug(f"🔍 媒体组 {message.media_group_id} 等待更多消息({len(messages)}条)")
@@ -3158,6 +3840,8 @@ async def listen_and_clone(client, message):
                             media_list.append(InputMediaPhoto(m.photo.file_id, caption=caption if i == 0 else ""))
                         elif m.video:
                             media_list.append(InputMediaVideo(m.video.file_id, caption=caption if i == 0 else ""))
+                    
+                    # 🔧 修复：处理包含媒体的媒体组
                     if media_list:
                         try:
                             # 如果有按钮，将按钮文本添加到第一个媒体的caption中，避免分成两条消息
@@ -3175,17 +3859,45 @@ async def listen_and_clone(client, message):
                                     media_list[0].caption = button_text.strip()
                             
                             await client.send_media_group(chat_id=pair['target'], media=media_list)
+                            logging.info(f"✅ 媒体组发送成功: {len(group_messages)} 条消息 (包含 {len(media_list)} 个媒体)")
                             
-                            # 移除单独的按钮发送，避免分成两条消息
-                            # if reply_markup:
-                            #     # 使用安全的按钮发送函数，避免 MESSAGE_EMPTY 错误
-                            #     await safe_send_button_message(client, pair['target'], reply_markup, "媒体组")
                         except Exception as e:
                             logging.error(f"媒体组 {message.media_group_id} 处理失败: {e}")
                         finally:
                             # 🔧 处理完成后清理状态
                             cleanup_media_group_status(message.media_group_id)
                             logging.info(f"🔓 媒体组 {message.media_group_id} 处理完成，释放锁")
+                    
+                    # 🔧 新增：处理纯文本媒体组（之前被忽略导致拆分的根本原因）
+                    else:
+                        try:
+                            # 纯文本媒体组：使用send_message发送合并后的文本内容
+                            if caption or full_text_content:
+                                final_text = caption or full_text_content
+                                
+                                # 如果有按钮，将按钮信息添加到文本中
+                                if reply_markup:
+                                    button_text = "\n\n📋 按钮："
+                                    for row in reply_markup.inline_keyboard:
+                                        for button in row:
+                                            if hasattr(button, 'text') and hasattr(button, 'url') and button.text and button.url:
+                                                button_text += f"\n• {button.text}: {button.url}"
+                                    final_text += button_text
+                                
+                                await client.send_message(
+                                    chat_id=pair['target'], 
+                                    text=final_text
+                                )
+                                logging.info(f"✅ 纯文本媒体组发送成功: {len(group_messages)} 条消息")
+                            else:
+                                logging.warning(f"⚠️ 媒体组无有效内容: {len(group_messages)} 条消息")
+                                
+                        except Exception as e:
+                            logging.error(f"纯文本媒体组 {message.media_group_id} 处理失败: {e}")
+                        finally:
+                            # 🔧 处理完成后清理状态
+                            cleanup_media_group_status(message.media_group_id)
+                            logging.info(f"🔓 纯文本媒体组 {message.media_group_id} 处理完成，释放锁")
                     
                     return
                 except Exception as e:
@@ -3353,6 +4065,13 @@ async def show_manage_filter_buttons_menu(message, user_id):
 async def request_add_whitelist_domain(message, user_id):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_add_btn_domain"}
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
     user_states.setdefault(user_id, []).append(new_task)
     await message.reply_text("请回复要添加的域名（不含 http/https），例如：example.com\n(多个域名用逗号分隔)")
 
@@ -3456,7 +4175,14 @@ async def view_config(message, user_id):
         f"📁 文件过滤: `{file_filter_extensions}`\n"
         f"🖼/🎬 媒体过滤: `{file_filter_media_str}`\n"
         f"✍️ 附加文字: `{tail_text}` ({tail_position})\n"
-        f"📋 附加按钮: `{buttons}`"
+        f"📋 附加按钮: `{buttons}`\n\n"
+        f"**🎯 搬运控制设置**\n"
+        f"💬 评论区搬运: {'✅ 开启' if config.get('enable_comment_forwarding') else '❌ 关闭'}\n"
+        f"👑 只搬运频道主: {'✅ 开启' if config.get('channel_owner_only') else '❌ 关闭'}\n"
+        f"🎬 只搬运媒体: {'✅ 开启' if config.get('media_only_mode') else '❌ 关闭'}\n\n"
+        f"**🔗 链接过滤设置**\n"
+        f"🧲 移除磁力链接: {'✅ 开启' if config.get('remove_magnet_links') else '❌ 关闭'}\n"
+        f"🌐 移除所有链接: {'✅ 开启' if config.get('remove_all_links') else '❌ 关闭'}"
     )
     
     await safe_edit_or_reply(message,
@@ -3933,7 +4659,12 @@ async def select_channel_pairs_to_clone(message, user_id):
     for i, pair in enumerate(channel_pairs):
         source = pair['source']
         target = pair['target']
-        is_selected = "✅" if i in new_task["selected_pairs_indices"] else "⬜"
+        # 修复：确保 selected_pairs_indices 是列表类型
+        selected_indices = new_task.get("selected_pairs_indices", [])
+        if not isinstance(selected_indices, list):
+            selected_indices = []
+            new_task["selected_pairs_indices"] = selected_indices
+        is_selected = "✅" if i in selected_indices else "⬜"
         buttons.append([InlineKeyboardButton(f"{is_selected} {source} -> {target}", callback_data=f"select_channel_pair:{task_id}:{i}")])
     
     buttons.append([InlineKeyboardButton("下一步 ➡️", callback_data=f"next_step_clone_range:{task_id}")])
@@ -3951,6 +4682,10 @@ async def handle_channel_pair_selection(callback_query, user_id, data):
         await callback_query.message.reply_text("❌ 任务已失效，请重新操作。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")]]))
         return
         
+    # 修复：确保 selected_pairs_indices 是列表类型
+    if "selected_pairs_indices" not in task or not isinstance(task["selected_pairs_indices"], list):
+        task["selected_pairs_indices"] = []
+    
     if pair_index in task["selected_pairs_indices"]:
         task["selected_pairs_indices"].remove(pair_index)
     else:
@@ -3963,7 +4698,12 @@ async def handle_channel_pair_selection(callback_query, user_id, data):
     for i, pair in enumerate(channel_pairs):
         source = pair['source']
         target = pair['target']
-        is_selected = "✅" if i in task["selected_pairs_indices"] else "⬜"
+        # 修复：确保 selected_pairs_indices 是列表类型
+        selected_indices = task.get("selected_pairs_indices", [])
+        if not isinstance(selected_indices, list):
+            selected_indices = []
+            task["selected_pairs_indices"] = selected_indices
+        is_selected = "✅" if i in selected_indices else "⬜"
         buttons.append([InlineKeyboardButton(f"{is_selected} {source} -> {target}", callback_data=f"select_channel_pair:{task_id}:{i}")])
     
     buttons.append([InlineKeyboardButton("下一步 ➡️", callback_data=f"next_step_clone_range:{task_id}")])
@@ -3990,14 +4730,20 @@ async def request_range_for_pair(message, user_id, task):
     try:
         pair_index = task["current_pair_index_for_range"]
         
+        # 修复：确保 selected_pairs_indices 是列表类型
+        selected_indices = task.get("selected_pairs_indices", [])
+        if not isinstance(selected_indices, list):
+            selected_indices = []
+            task["selected_pairs_indices"] = selected_indices
+        
         # 验证索引范围
-        if pair_index >= len(task["selected_pairs_indices"]):
-            logging.error(f"任务 {task['task_id'][:8]} 请求范围时索引超出范围: pair_index={pair_index}, selected_pairs_indices={task['selected_pairs_indices']}")
+        if pair_index >= len(selected_indices):
+            logging.error(f"任务 {task['task_id'][:8]} 请求范围时索引超出范围: pair_index={pair_index}, selected_pairs_indices={selected_indices}")
             await message.reply_text("❌ 任务状态错误，请重新开始。")
             task["state"] = "waiting_for_range_for_pair"
             return
         
-        selected_pair_index = task["selected_pairs_indices"][pair_index]
+        selected_pair_index = selected_indices[pair_index]
         
         # 获取启用的频道组列表
         enabled_pairs = [p for p in user_configs.get(str(user_id), {}).get("channel_pairs", []) if p.get("enabled", True)]
@@ -4022,7 +4768,7 @@ async def request_range_for_pair(message, user_id, task):
         
         # 显示当前进度
         current_task_num = pair_index + 1
-        total_tasks = len(task["selected_pairs_indices"])
+        total_tasks = len(selected_indices)
         
         await message.reply_text(
             f"🔢 **请为频道组 `{source}` -> `{target}` 回复信息ID范围，例如：`100-200`**\n"
@@ -4056,15 +4802,21 @@ async def handle_range_input_for_pair(message, user_id, task):
             await message.reply_text("❌ 开始ID必须小于或等于结束ID。")
             return
         
+        # 修复：确保 selected_pairs_indices 是列表类型
+        selected_indices = task.get("selected_pairs_indices", [])
+        if not isinstance(selected_indices, list):
+            selected_indices = []
+            task["selected_pairs_indices"] = selected_indices
+        
         # 获取当前处理的频道组索引
         pair_index = task["current_pair_index_for_range"]
-        if pair_index >= len(task["selected_pairs_indices"]):
-            logging.error(f"任务 {task['task_id'][:8]} 索引超出范围: pair_index={pair_index}, selected_pairs_indices={task['selected_pairs_indices']}")
+        if pair_index >= len(selected_indices):
+            logging.error(f"任务 {task['task_id'][:8]} 索引超出范围: pair_index={pair_index}, selected_pairs_indices={selected_indices}")
             await message.reply_text("❌ 任务状态错误，请重新开始。")
             task["state"] = "waiting_for_range_for_pair"
             return
         
-        original_pair_index = task["selected_pairs_indices"][pair_index]
+        original_pair_index = selected_indices[pair_index]
         
         # 获取启用的频道组列表
         enabled_pairs = [p for p in user_configs.get(str(user_id), {}).get("channel_pairs", []) if p.get("enabled", True)]
@@ -4098,7 +4850,7 @@ async def handle_range_input_for_pair(message, user_id, task):
 
         task["current_pair_index_for_range"] += 1
 
-        if task["current_pair_index_for_range"] < len(task["selected_pairs_indices"]):
+        if task["current_pair_index_for_range"] < len(selected_indices):
             await request_range_for_pair(message, user_id, task)
         else:
             task["state"] = "confirming_clone"
@@ -4130,7 +4882,15 @@ async def handle_range_input_for_pair(message, user_id, task):
 async def request_channel_pair_input(message, user_id):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_source", "pair_data": {}}
-    if user_id not in user_states: user_states[user_id] = []
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
+    if user_id not in user_states:
+        user_states[user_id] = []
     user_states[user_id].append(new_task)
     
     await safe_edit_or_reply(message, f"请回复**采集频道**的用户名或ID。\n例如：`@mychannel` 或 `-1001234567890`\n(任务ID: `{task_id[:8]}`)")
@@ -4139,7 +4899,15 @@ async def request_channel_pair_input(message, user_id):
 async def request_edit_pair_input(message, user_id, pair_id, channel_type):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_edit_input", "pair_id": pair_id, "channel_type": channel_type}
-    if user_id not in user_states: user_states[user_id] = []
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
+    if user_id not in user_states:
+        user_states[user_id] = []
     user_states[user_id].append(new_task)
     
     text = f"✏️ 请回复新的**{ '采集频道' if channel_type == 'source' else '目标频道' }**的用户名或ID。\n(任务ID: `{task_id[:8]}`)"
@@ -4155,11 +4923,93 @@ async def handle_edit_pair_input(client, message, user_id, task):
         logging.info(f"用户 {user_id} 尝试验证频道: 原始输入='{channel_id}'")
         processed_channel_id = parse_channel_identifier(channel_id)
         logging.info(f"用户 {user_id} 频道ID解析结果: '{processed_channel_id}' (类型: {type(processed_channel_id)})")
+        
+        # 尝试多种方法获取频道信息
+        chat = None
+        error_messages = []
+        
+        # 方法1：直接尝试
+        try:
+            chat = await client.get_chat(processed_channel_id)
+            logging.info(f"方法1成功: 直接获取频道信息")
+        except Exception as e1:
+            error_messages.append(f"方法1失败: {e1}")
             
-        chat = await client.get_chat(processed_channel_id)
+            # 方法2：如果是私密频道，尝试构造不同的ID格式
+            if isinstance(processed_channel_id, int) and processed_channel_id > 0:
+                try:
+                    # 尝试添加 -100 前缀
+                    prefixed_id = int(f"-100{processed_channel_id}")
+                    logging.info(f"尝试方法2: 使用前缀ID {prefixed_id}")
+                    chat = await client.get_chat(prefixed_id)
+                    logging.info(f"方法2成功: 使用前缀ID获取频道信息")
+                    # 更新处理后的ID
+                    processed_channel_id = prefixed_id
+                except Exception as e2:
+                    error_messages.append(f"方法2失败: {e2}")
+                    
+                    # 方法3：尝试其他可能的格式
+                    try:
+                        alt_id = int(f"-1001{processed_channel_id}")
+                        logging.info(f"尝试方法3: 使用替代前缀ID {alt_id}")
+                        chat = await client.get_chat(alt_id)
+                        logging.info(f"方法3成功: 使用替代前缀ID获取频道信息")
+                        # 更新处理后的ID
+                        processed_channel_id = alt_id
+                    except Exception as e3:
+                        error_messages.append(f"方法3失败: {e3}")
+        
+        if not chat:
+            # 所有方法都失败了，尝试通过消息ID获取频道信息
+            if "c/" in channel_id and "/" in channel_id:
+                try:
+                    # 尝试通过消息ID获取频道信息
+                    parts = channel_id.split('/')
+                    if len(parts) >= 3 and parts[1] == 'c' and parts[2].isdigit():
+                        channel_num_id = int(parts[2])
+                        message_id = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+                        
+                        logging.info(f"尝试通过消息获取频道信息: 频道ID={channel_num_id}, 消息ID={message_id}")
+                        
+                        # 尝试获取消息，从而获取频道信息
+                        try:
+                            # 构造可能的频道ID格式
+                            possible_ids = [
+                                channel_num_id,
+                                int(f"-100{channel_num_id}"),
+                                int(f"-1001{channel_num_id}")
+                            ]
+                            
+                            for pid in possible_ids:
+                                try:
+                                    logging.info(f"尝试通过消息ID {message_id} 获取频道 {pid} 的信息")
+                                    message = await client.get_messages(chat_id=pid, message_ids=message_id)
+                                    if message:
+                                        chat = await client.get_chat(pid)
+                                        logging.info(f"通过消息成功获取频道信息: {chat.title}")
+                                        processed_channel_id = pid
+                                        break
+                                except Exception as msg_e:
+                                    logging.debug(f"通过消息ID {message_id} 获取频道 {pid} 失败: {msg_e}")
+                                    continue
+                            
+                        except Exception as msg_e:
+                            logging.warning(f"通过消息获取频道信息失败: {msg_e}")
+                            
+                except Exception as parse_e:
+                    logging.warning(f"解析消息链接失败: {parse_e}")
+            
+            # 如果仍然没有获取到频道信息
+            if not chat:
+                raise Exception(f"无法获取频道信息。尝试的方法:\n" + "\n".join(error_messages))
+        
         logging.info(f"用户 {user_id} 频道验证成功: {chat.title} (ID: {chat.id})")
         
         user_configs.setdefault(str(user_id), {}).setdefault("channel_pairs", [])
+        # 修复：确保 channel_pairs 是列表类型
+        if not isinstance(user_configs[str(user_id)]["channel_pairs"], list):
+            user_configs[str(user_id)]["channel_pairs"] = []
+        
         if not (0 <= pair_id < len(user_configs[str(user_id)]["channel_pairs"])):
             raise ValueError("Invalid pair_id")
 
@@ -4178,8 +5028,87 @@ async def set_channel_pair(client, message, user_id, channel_type, channel_id, t
     logging.info(f"用户 {user_id} 尝试设定 {channel_type} 频道: 原始输入='{channel_id}'")
     processed_channel_id = parse_channel_identifier(channel_id)
     logging.info(f"用户 {user_id} 频道ID解析结果: '{processed_channel_id}' (类型: {type(processed_channel_id)})")
+    
     try:
-        chat = await client.get_chat(processed_channel_id)
+        # 尝试多种方法获取频道信息
+        chat = None
+        error_messages = []
+        
+        # 方法1：直接尝试
+        try:
+            chat = await client.get_chat(processed_channel_id)
+            logging.info(f"方法1成功: 直接获取频道信息")
+        except Exception as e1:
+            error_messages.append(f"方法1失败: {e1}")
+            
+            # 方法2：如果是私密频道，尝试构造不同的ID格式
+            if isinstance(processed_channel_id, int) and processed_channel_id > 0:
+                try:
+                    # 尝试添加 -100 前缀
+                    prefixed_id = int(f"-100{processed_channel_id}")
+                    logging.info(f"尝试方法2: 使用前缀ID {prefixed_id}")
+                    chat = await client.get_chat(prefixed_id)
+                    logging.info(f"方法2成功: 使用前缀ID获取频道信息")
+                    # 更新处理后的ID
+                    processed_channel_id = prefixed_id
+                except Exception as e2:
+                    error_messages.append(f"方法2失败: {e2}")
+                    
+                    # 方法3：尝试其他可能的格式
+                    try:
+                        alt_id = int(f"-1001{processed_channel_id}")
+                        logging.info(f"尝试方法3: 使用替代前缀ID {alt_id}")
+                        chat = await client.get_chat(alt_id)
+                        logging.info(f"方法3成功: 使用替代前缀ID获取频道信息")
+                        # 更新处理后的ID
+                        processed_channel_id = alt_id
+                    except Exception as e3:
+                        error_messages.append(f"方法3失败: {e3}")
+        
+        if not chat:
+            # 所有方法都失败了，尝试通过消息ID获取频道信息
+            if "c/" in channel_id and "/" in channel_id:
+                try:
+                    # 尝试通过消息ID获取频道信息
+                    parts = channel_id.split('/')
+                    if len(parts) >= 3 and parts[1] == 'c' and parts[2].isdigit():
+                        channel_num_id = int(parts[2])
+                        message_id = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+                        
+                        logging.info(f"尝试通过消息获取频道信息: 频道ID={channel_num_id}, 消息ID={message_id}")
+                        
+                        # 尝试获取消息，从而获取频道信息
+                        try:
+                            # 构造可能的频道ID格式
+                            possible_ids = [
+                                channel_num_id,
+                                int(f"-100{channel_num_id}"),
+                                int(f"-1001{channel_num_id}")
+                            ]
+                            
+                            for pid in possible_ids:
+                                try:
+                                    logging.info(f"尝试通过消息ID {message_id} 获取频道 {pid} 的信息")
+                                    message = await client.get_messages(chat_id=pid, message_ids=message_id)
+                                    if message:
+                                        chat = await client.get_chat(pid)
+                                        logging.info(f"通过消息成功获取频道信息: {chat.title}")
+                                        processed_channel_id = pid
+                                        break
+                                except Exception as msg_e:
+                                    logging.debug(f"通过消息ID {message_id} 获取频道 {pid} 失败: {msg_e}")
+                                    continue
+                            
+                        except Exception as msg_e:
+                            logging.warning(f"通过消息获取频道信息失败: {msg_e}")
+                            
+                except Exception as parse_e:
+                    logging.warning(f"解析消息链接失败: {parse_e}")
+            
+            # 如果仍然没有获取到频道信息
+            if not chat:
+                raise Exception(f"无法获取频道信息。尝试的方法:\n" + "\n".join(error_messages))
+        
         logging.info(f"用户 {user_id} 频道验证成功: {chat.title} (ID: {chat.id})")
         task["pair_data"][channel_type] = processed_channel_id
         logging.info(f"用户 {user_id} 正在设定 {channel_type} 频道为 {processed_channel_id}")
@@ -4199,8 +5128,32 @@ async def set_channel_pair(client, message, user_id, channel_type, channel_id, t
             await show_channel_config_menu(message, user_id)
     except Exception as e:
         logging.error(f"用户 {user_id} 设定 {channel_type} 频道失败 - 原始输入: '{channel_id}', 解析结果: '{processed_channel_id}', 错误: {e}")
+        
+        # 添加更详细的错误信息
+        error_details = f"❌ **频道验证失败**\n\n"
+        error_details += f"**错误类型**: {type(e).__name__}\n"
+        error_details += f"**错误信息**: {str(e)}\n\n"
+        error_details += f"**调试信息**:\n"
+        error_details += f"• 原始输入: `{channel_id}`\n"
+        error_details += f"• 解析结果: `{processed_channel_id}`\n"
+        error_details += f"• 解析类型: {type(processed_channel_id)}\n\n"
+        
+        # 针对私密频道的特殊建议
+        if "Peer id invalid" in str(e) and "c/" in channel_id:
+            error_details += "**私密频道特殊说明**:\n"
+            error_details += "• 确认机器人已加入该私密频道\n"
+            error_details += "• 确认机器人拥有管理员权限\n"
+            error_details += "• 尝试使用频道中的最新消息链接\n"
+            error_details += "• 或者直接使用频道ID数字部分\n\n"
+        
+        error_details += "**常见解决方案**:\n"
+        error_details += "• 检查频道ID是否正确\n"
+        error_details += "• 确认机器人已加入频道\n"
+        error_details += "• 确认机器人拥有足够权限\n"
+        error_details += "• 尝试重新邀请机器人加入频道"
+        
         remove_task(user_id, task["task_id"])
-        await message.reply_text(f"❌ 频道验证失败: {e}\n\n**调试信息:**\n原始输入: `{channel_id}`\n解析结果: `{processed_channel_id}`\n\n请检查频道ID或机器人是否拥有权限。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")]]))
+        await message.reply_text(error_details, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="show_main_menu")]]))
 
 # ==================== 功能设定函数 (新版互动式) ====================
 async def show_manage_keywords_menu(message, user_id):
@@ -4223,6 +5176,13 @@ async def show_manage_keywords_menu(message, user_id):
 async def request_add_keyword(message, user_id):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_add_keyword"}
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
     user_states.setdefault(user_id, []).append(new_task)
     await message.reply_text("📝 请回复您想新增的关键字。\n(多个关键字请用逗号 `,` 分隔)")
 
@@ -4289,6 +5249,13 @@ async def show_manage_replacements_menu(message, user_id):
 async def request_add_replacement(message, user_id):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_add_replacement"}
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
     user_states.setdefault(user_id, []).append(new_task)
     await message.reply_text("🔀 请回复您想新增的替换规则，格式为 `敏感词->替换文本`。\n(多个规则请用逗号 `,` 分隔)")
 
@@ -4385,16 +5352,54 @@ async def show_pair_filter_menu(message, user_id, pair_id):
         text += "📋 **当前状态**: 已设置专用过滤\n\n"
         
         # 显示当前设置摘要
-        keywords_count = len(custom_filters.get("filter_keywords", []))
-        replacements_count = len(custom_filters.get("replacement_words", {}))
-        extensions_count = len(custom_filters.get("file_filter_extensions", []))
-        buttons_count = len(custom_filters.get("buttons", []))
+        # 添加类型检查，防止配置值类型错误
+        filter_keywords = custom_filters.get("filter_keywords", [])
+        replacement_words = custom_filters.get("replacement_words", {})
+        file_extensions = custom_filters.get("file_filter_extensions", [])
+        buttons = custom_filters.get("buttons", [])
+        
+        keywords_count = len(filter_keywords) if isinstance(filter_keywords, (list, tuple)) else 0
+        replacements_count = len(replacement_words) if isinstance(replacement_words, dict) else 0
+        extensions_count = len(file_extensions) if isinstance(file_extensions, (list, tuple)) else 0
+        buttons_count = len(buttons) if isinstance(buttons, (list, tuple)) else 0
+        
+        # 新增：显示链接和内容过滤设置
+        remove_links = custom_filters.get("remove_links", False)
+        remove_magnet_links = custom_filters.get("remove_magnet_links", False)
+        remove_all_links = custom_filters.get("remove_all_links", False)
+        remove_hashtags = custom_filters.get("remove_hashtags", False)
+        remove_usernames = custom_filters.get("remove_usernames", False)
+        remove_photos = custom_filters.get("remove_photos", False)
+        remove_videos = custom_filters.get("remove_videos", False)
+        filter_buttons = custom_filters.get("filter_buttons", False)
+        
+        # 新增：显示搬运控制设置
+        enable_comment_forwarding = custom_filters.get("enable_comment_forwarding", False)
+        channel_owner_only = custom_filters.get("channel_owner_only", False)
+        media_only_mode = custom_filters.get("media_only_mode", False)
         
         text += "🎯 **过滤设置摘要**:\n"
         text += f"   📝 过滤关键字: {keywords_count} 个\n"
         text += f"   🔀 敏感词替换: {replacements_count} 个\n"
         text += f"   📁 文件扩展名: {extensions_count} 个\n"
         text += f"   📋 自定义按钮: {buttons_count} 个\n\n"
+        
+        text += "🔗 **链接过滤设置**:\n"
+        text += f"   🔗 HTTP链接: {'✅ 移除' if remove_links else '❌ 保留'}\n"
+        text += f"   🧲 磁力链接: {'✅ 移除' if remove_magnet_links else '❌ 保留'}\n"
+        text += f"   🌐 所有链接: {'✅ 移除' if remove_all_links else '❌ 保留'}\n"
+        text += f"   🏷 标签: {'✅ 移除' if remove_hashtags else '❌ 保留'}\n"
+        text += f"   👤 用户名: {'✅ 移除' if remove_usernames else '❌ 保留'}\n\n"
+        
+        text += "🎬 **媒体过滤设置**:\n"
+        text += f"   🖼 图片: {'✅ 过滤' if remove_photos else '❌ 保留'}\n"
+        text += f"   🎬 视频: {'✅ 过滤' if remove_videos else '❌ 保留'}\n"
+        text += f"   🚫 按钮: {'✅ 过滤' if filter_buttons else '❌ 保留'}\n\n"
+        
+        text += "🎯 **搬运控制设置**:\n"
+        text += f"   💬 评论区搬运: {'✅ 开启' if enable_comment_forwarding else '❌ 关闭'}\n"
+        text += f"   👑 只搬运频道主: {'✅ 开启' if channel_owner_only else '❌ 关闭'}\n"
+        text += f"   🎬 只搬运媒体: {'✅ 开启' if media_only_mode else '❌ 关闭'}\n\n"
     
     # 构建按钮
     buttons = []
@@ -4408,6 +5413,13 @@ async def show_pair_filter_menu(message, user_id, pair_id):
              InlineKeyboardButton("🔀 敏感词替换", callback_data=f"pair_filter_replacements:{pair_id}")],
             [InlineKeyboardButton("📁 文件类型过滤", callback_data=f"pair_filter_files:{pair_id}"),
              InlineKeyboardButton("🔗 文本内容移除", callback_data=f"pair_filter_content:{pair_id}")],
+            
+            # 新增：搬运控制选项
+            [InlineKeyboardButton("🎯 **搬运控制设置**", callback_data="forwarding_control_header")],
+            [InlineKeyboardButton("💬 评论区搬运", callback_data=f"pair_comment_forwarding:{pair_id}"),
+             InlineKeyboardButton("👑 只搬运频道主", callback_data=f"pair_channel_owner_only:{pair_id}")],
+            [InlineKeyboardButton("🎬 只搬运视频图片", callback_data=f"pair_media_only_mode:{pair_id}")],
+            
             [InlineKeyboardButton("📋 自定义按钮", callback_data=f"pair_filter_buttons:{pair_id}"),
              InlineKeyboardButton("🎛️ 按钮策略", callback_data=f"pair_filter_button_policy:{pair_id}")],
             [InlineKeyboardButton("✍️ 文本小尾巴", callback_data=f"pair_filter_tail_text:{pair_id}")],
@@ -4440,6 +5452,13 @@ async def enable_pair_filters(message, user_id, pair_id):
         "filter_photo": global_config.get("filter_photo", False),
         "filter_video": global_config.get("filter_video", False),
         "filter_buttons": global_config.get("filter_buttons", False),
+        # 新增：复制新的过滤选项
+        "enable_comment_forwarding": global_config.get("enable_comment_forwarding", False),
+        "channel_owner_only": global_config.get("channel_owner_only", False),
+        "media_only_mode": global_config.get("media_only_mode", False),
+        # 新增：复制磁力链接和所有链接移除选项
+        "remove_magnet_links": global_config.get("remove_magnet_links", False),
+        "remove_all_links": global_config.get("remove_all_links", False),
         "buttons": global_config.get("buttons", []).copy(),
         "tail_text": global_config.get("tail_text", ""),
         "tail_position": global_config.get("tail_position", "end")
@@ -4629,11 +5648,11 @@ async def set_pair_add_keyword(message, user_id, keywords_text):
         return
     
     pair_id = user_state.get("pair_id")
-    if pair_id is None or pair_id >= len(config.get("channel_pairs", [])):
+    channel_pairs = config.get("channel_pairs", [])
+    if pair_id is None or not isinstance(channel_pairs, (list, tuple)) or pair_id >= len(channel_pairs):
         await safe_edit_or_reply(message, "❌ 频道组不存在。")
         return
     
-    channel_pairs = config.get("channel_pairs", [])
     pair = channel_pairs[pair_id]
     
     if not pair.get("custom_filters"):
@@ -4862,17 +5881,23 @@ async def show_pair_content_menu(message, user_id, pair_id):
     remove_links_mode = custom_filters.get("remove_links_mode", "links_only")
     remove_hashtags = custom_filters.get("remove_hashtags", False)
     remove_usernames = custom_filters.get("remove_usernames", False)
+    remove_magnet_links = custom_filters.get("remove_magnet_links", False)
+    remove_all_links = custom_filters.get("remove_all_links", False)
     
     text = f"🔗 **频道组文本内容移除设置**\n\n"
     text += f"📂 **频道组**: `{source}` ➜ `{target}`\n\n"
-    text += f"🔗 **移除链接**: {'✅ 开启' if remove_links else '❌ 关闭'} ({'仅移除链接' if remove_links_mode == 'links_only' else '移除整条消息'})\n"
+    text += f"🔗 **移除HTTP链接**: {'✅ 开启' if remove_links else '❌ 关闭'} ({'仅移除链接' if remove_links_mode == 'links_only' else '移除整条消息'})\n"
+    text += f"🧲 **移除磁力链接**: {'✅ 开启' if remove_magnet_links else '❌ 关闭'}\n"
+    text += f"🌐 **移除所有链接**: {'✅ 开启' if remove_all_links else '❌ 关闭'}\n"
     text += f"🏷 **移除标签**: {'✅ 开启' if remove_hashtags else '❌ 关闭'}\n"
     text += f"👤 **移除用户名**: {'✅ 开启' if remove_usernames else '❌ 关闭'}\n\n"
     
     text += "💡 **说明**: 开启后，搬运时会自动移除相应的文本内容。\n\n"
     
     buttons = [
-        [InlineKeyboardButton("🔗 链接移除", callback_data=f"pair_toggle_links:{pair_id}")],
+        [InlineKeyboardButton("🔗 HTTP链接移除", callback_data=f"pair_toggle_links:{pair_id}")],
+        [InlineKeyboardButton("🧲 磁力链接移除", callback_data=f"pair_toggle_magnet_links:{pair_id}")],
+        [InlineKeyboardButton("🌐 所有链接移除", callback_data=f"pair_toggle_all_links:{pair_id}")],
         [InlineKeyboardButton("🏷 标签移除", callback_data=f"pair_toggle_hashtags:{pair_id}")],
         [InlineKeyboardButton("👤 用户名移除", callback_data=f"pair_toggle_usernames:{pair_id}")],
         [InlineKeyboardButton("🔙 返回过滤设置", callback_data=f"manage_pair_filters:{pair_id}")]
@@ -5040,11 +6065,11 @@ async def set_pair_tail_text(message, user_id, tail_text):
         return
     
     pair_id = user_state.get("pair_id")
-    if pair_id is None or pair_id >= len(config.get("channel_pairs", [])):
+    channel_pairs = config.get("channel_pairs", [])
+    if pair_id is None or not isinstance(channel_pairs, (list, tuple)) or pair_id >= len(channel_pairs):
         await safe_edit_or_reply(message, "❌ 频道组不存在。")
         return
     
-    channel_pairs = config.get("channel_pairs", [])
     pair = channel_pairs[pair_id]
     
     if not pair.get("custom_filters"):
@@ -5106,11 +6131,11 @@ async def set_pair_buttons(message, user_id, buttons_text):
         return
     
     pair_id = user_state.get("pair_id")
-    if pair_id is None or pair_id >= len(config.get("channel_pairs", [])):
+    channel_pairs = config.get("channel_pairs", [])
+    if pair_id is None or not isinstance(channel_pairs, (list, tuple)) or pair_id >= len(channel_pairs):
         await safe_edit_or_reply(message, "❌ 频道组不存在。")
         return
     
-    channel_pairs = config.get("channel_pairs", [])
     pair = channel_pairs[pair_id]
     
     if not pair.get("custom_filters"):
@@ -5575,6 +6600,47 @@ def quick_filter_check(message, config):
 
 def should_filter_message(message, config):
     """判断消息是否应该被过滤"""
+    # 新增：评论区搬运控制
+    enable_comment_forwarding = config.get("enable_comment_forwarding", False)
+    
+    # 如果关闭评论区搬运，只搬运频道主发布的内容
+    if not enable_comment_forwarding:
+        # 检查消息是否来自频道主
+        # 频道主发布的消息通常没有 from_user 字段，或者 from_user 是频道本身
+        if hasattr(message, 'from_user') and message.from_user:
+            # 如果消息有发送者信息，说明可能是评论或回复
+            logging.debug(f"消息 {message.id} 被评论区过滤: 非频道主发布 (from_user: {message.from_user.id})")
+            return True
+        else:
+            # 没有 from_user 字段，通常是频道主发布的内容
+            logging.debug(f"消息 {message.id} 通过评论区过滤: 频道主发布")
+    
+    # 新增：只搬运频道主信息
+    if config.get("channel_owner_only", False):
+        # 检查消息是否来自频道主
+        if hasattr(message, 'from_user') and message.from_user:
+            # 如果消息有发送者信息，说明不是频道主发布的
+            logging.debug(f"消息 {message.id} 被频道主过滤: 非频道主发布")
+            return True
+    
+    # 新增：只搬运媒体内容
+    if config.get("media_only_mode", False):
+        # 检查消息是否包含媒体内容
+        has_media = any([
+            message.photo,
+            message.video,
+            message.video_note,
+            message.animation,
+            message.document,
+            message.audio,
+            message.voice,
+            message.sticker
+        ])
+        
+        if not has_media:
+            logging.debug(f"消息 {message.id} 被媒体过滤: 不包含媒体内容")
+            return True
+    
     # 关键字过滤
     filter_keywords = config.get("filter_keywords", [])
     text_to_check = ""
@@ -5583,20 +6649,22 @@ def should_filter_message(message, config):
     if message.text:
         text_to_check += message.text.lower()
     
-    # 添加详细的过滤日志
-    if filter_keywords:
+    # 添加详细的过滤日志和类型检查
+    if filter_keywords and isinstance(filter_keywords, (list, tuple)):
         logging.debug(f"🔍 过滤检查: 消息ID {message.id}, 文本长度: {len(text_to_check)}")
         logging.debug(f"🔍 过滤检查: 关键词数量: {len(filter_keywords)}")
         
         # 检查每个关键词
         for keyword in filter_keywords:
-            if keyword.lower() in text_to_check:
+            if isinstance(keyword, str) and keyword.lower() in text_to_check:
                 logging.info(f"🚫 消息 {message.id} 被关键字过滤: '{keyword}' 匹配文本")
                 return True
         
         logging.debug(f"✅ 消息 {message.id} 通过关键字过滤检查")
     else:
-        logging.debug(f"⚠️ 消息 {message.id} 过滤检查: 未配置关键词")
+        if filter_keywords and not isinstance(filter_keywords, (list, tuple)):
+            logging.warning(f"⚠️ 过滤检查: filter_keywords 类型错误，期望列表，实际: {type(filter_keywords)}, 值: {filter_keywords}")
+        logging.debug(f"⚠️ 消息 {message.id} 过滤检查: 未配置关键词或类型错误")
     
     # 过滤带按钮的消息（支持策略）
     filter_buttons_enabled = config.get("filter_buttons")
@@ -5607,7 +6675,7 @@ def should_filter_message(message, config):
 
     # 文件类型过滤
     filter_extensions = config.get("file_filter_extensions", [])
-    if message.document and filter_extensions:
+    if message.document and filter_extensions and isinstance(filter_extensions, (list, tuple)):
         filename = getattr(message.document, 'file_name', '')
         if filename and '.' in filename:
             ext = filename.lower().rsplit('.', 1)[1]
@@ -5856,6 +6924,13 @@ async def show_manage_file_extensions_menu(message, user_id):
 async def request_add_file_extension(message, user_id):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_add_file_extension"}
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
     user_states.setdefault(user_id, []).append(new_task)
     await message.reply_text("📁 请回复您想新增的副档名。\n(多个副档名请用逗号 `,` 分隔)")
 
@@ -5938,6 +7013,16 @@ async def handle_toggle_options(message, user_id, data):
     elif option == "realtime_listen":
         user_configs[str(user_id)]["realtime_listen"] = not user_configs[str(user_id)].get("realtime_listen", False)
         logging.info(f"用户 {user_id} toggled realtime_listen to {user_configs[str(user_id)]['realtime_listen']}")
+    # 新增：处理搬运控制选项
+    elif option == "comment_forwarding":
+        user_configs[str(user_id)]["enable_comment_forwarding"] = not user_configs[str(user_id)].get("enable_comment_forwarding", False)
+        logging.info(f"用户 {user_id} toggled enable_comment_forwarding to {user_configs[str(user_id)]['enable_comment_forwarding']}")
+    elif option == "channel_owner_only":
+        user_configs[str(user_id)]["channel_owner_only"] = not user_configs[str(user_id)].get("channel_owner_only", False)
+        logging.info(f"用户 {user_id} toggled channel_owner_only to {user_configs[str(user_id)]['channel_owner_only']}")
+    elif option == "media_only_mode":
+        user_configs[str(user_id)]["media_only_mode"] = not user_configs[str(user_id)].get("media_only_mode", False)
+        logging.info(f"用户 {user_id} toggled media_only_mode to {user_configs[str(user_id)]['media_only_mode']}")
     
     save_configs() # 新增: 保存配置
         
@@ -5949,11 +7034,22 @@ async def handle_toggle_options(message, user_id, data):
         await toggle_content_removal_menu(message, user_id)
     elif "filter" in option:
         await show_file_filter_menu(message, user_id)
+    # 新增：处理搬运控制选项的返回逻辑
+    elif option in ["comment_forwarding", "channel_owner_only", "media_only_mode"]:
+        await show_feature_config_menu(message, user_id)
 
 async def request_tail_text(message, user_id):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_tail_text"}
-    if user_id not in user_states: user_states[user_id] = []
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
+    if user_id not in user_states:
+        user_states[user_id] = []
     user_states[user_id].append(new_task)
     save_user_states()  # 保存用户状态
     
@@ -6028,7 +7124,15 @@ async def handle_tail_position_setting(message, user_id, data):
 async def request_buttons_input(message, user_id):
     task_id = str(uuid.uuid4())
     new_task = {"task_id": task_id, "state": "waiting_for_buttons"}
-    if user_id not in user_states: user_states[user_id] = []
+    
+    # 修复：确保 user_states 是字典类型
+    global user_states
+    if not isinstance(user_states, dict):
+        logging.warning(f"user_states 类型错误，重置为字典: {type(user_states)}")
+        user_states = {}
+    
+    if user_id not in user_states:
+        user_states[user_id] = []
     user_states[user_id].append(new_task)
     
     # 添加返回按钮
@@ -6264,7 +7368,13 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
     original_task = task
     
     task_id_short = original_task["task_id"][:8]
-    clone_tasks = original_task["clone_tasks"]
+    clone_tasks = original_task.get("clone_tasks", [])
+    
+    # 修复：确保 clone_tasks 是列表类型
+    if not isinstance(clone_tasks, list):
+        logging.error(f"任务 {task_id_short} 的 clone_tasks 类型错误: {type(clone_tasks)}, 重置为空列表")
+        clone_tasks = []
+        original_task["clone_tasks"] = clone_tasks
     
     logging.info(f"🚀 使用新引擎启动任务 `{task_id_short}` (共 {len(clone_tasks)} 个子任务)")
     
@@ -6274,7 +7384,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         
         await safe_edit_or_reply(message, 
             f"🆕 **老湿姬2.0搬运** `{task_id_short}`\n"
-            f"📋 子任务数: {len(clone_tasks)}\n"
+            f"📋 子任务数: {len(clone_tasks) if isinstance(clone_tasks, list) else 0}\n"
             f"🔧 引擎: 老湿姬2.0\n"
             f"⏳ 正在初始化并发任务...",
             reply_markup=InlineKeyboardMarkup([[
@@ -6285,14 +7395,26 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         # 立即显示任务列表，让用户知道系统在工作
         await asyncio.sleep(0.1)  # 短暂延迟确保消息发送
         subtask_list = "📋 **子任务列表**:\n"
-        for j, sub_task_item in enumerate(clone_tasks):
-            sub_source = sub_task_item['pair']['source'][:20] + "..." if len(sub_task_item['pair']['source']) > 20 else sub_task_item['pair']['source']
-            sub_target = sub_task_item['pair']['target'][:20] + "..." if len(sub_task_item['pair']['target']) > 20 else sub_task_item['pair']['target']
-            subtask_list += f"🔄 **任务{j+1}**: `{sub_source}` → `{sub_target}`\n"
+        if isinstance(clone_tasks, list) and clone_tasks:
+            for j, sub_task_item in enumerate(clone_tasks):
+                if isinstance(sub_task_item, dict) and 'pair' in sub_task_item:
+                    # 修复：确保 source 和 target 是字符串类型
+                    source = sub_task_item['pair'].get('source', '')
+                    target = sub_task_item['pair'].get('target', '')
+                    if not isinstance(source, str):
+                        source = str(source) if source is not None else '未知来源'
+                    if not isinstance(target, str):
+                        target = str(target) if target is not None else '未知目标'
+                    
+                    sub_source = source[:20] + "..." if len(source) > 20 else source
+                    sub_target = target[:20] + "..." if len(target) > 20 else target
+                    subtask_list += f"🔄 **任务{j+1}**: `{sub_source}` → `{sub_target}`\n"
+        else:
+            subtask_list += "⚠️ 没有可执行的子任务\n"
         
         await safe_edit_or_reply(message, 
             f"🆕 **老湿姬2.0搬运** `{task_id_short}`\n"
-            f"📋 子任务数: {len(clone_tasks)}\n"
+            f"📋 子任务数: {len(clone_tasks) if isinstance(clone_tasks, list) else 0}\n"
             f"🔧 引擎: 老湿姬2.0 (并发模式)\n"
             f"🚀 正在启动搬运引擎...\n\n"
             f"{subtask_list}",
@@ -6313,19 +7435,20 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         }
         
         # 并发处理多个子任务
-        logging.info(f"🚀 开始并发执行 {len(clone_tasks)} 个子任务")
-        print(f"[DEBUG] 控制台日志测试: 开始并发执行 {len(clone_tasks)} 个子任务")  # 调试用
+        logging.info(f"🚀 开始并发执行 {len(clone_tasks) if isinstance(clone_tasks, list) else 0} 个子任务")
+        print(f"[DEBUG] 控制台日志测试: 开始并发执行 {len(clone_tasks) if isinstance(clone_tasks, list) else 0} 个子任务")  # 调试用
         
         # 创建任务状态跟踪
         task_progress = {}
-        for i, sub_task in enumerate(clone_tasks):
-            task_progress[i] = {
-                "status": "等待中",
-                "progress": 0,
-                "cloned": 0,
-                "processed": 0,
-                "errors": 0
-            }
+        if isinstance(clone_tasks, list):
+            for i, sub_task in enumerate(clone_tasks):
+                task_progress[i] = {
+                    "status": "等待中",
+                    "progress": 0,
+                    "cloned": 0,
+                    "processed": 0,
+                    "errors": 0
+                }
         
         # 全局进度更新锁和时间
         last_global_update = 0
@@ -6358,26 +7481,35 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     speed = total_cloned / max(elapsed, 1)
                     
                     # 构建简化的任务状态显示（文本模式，更快渲染）
-                    concurrent_status = f"**并发任务状态** ({len(clone_tasks)} 个任务):\n"
-                    for j, sub_task_item in enumerate(clone_tasks):
-                        sub_source = sub_task_item['pair']['source'][:12] + "..." if len(sub_task_item['pair']['source']) > 12 else sub_task_item['pair']['source']
-                        sub_target = sub_task_item['pair']['target'][:12] + "..." if len(sub_task_item['pair']['target']) > 12 else sub_task_item['pair']['target']
-                        
-                        progress_info = task_progress[j]
-                        status = progress_info["status"]
-                        progress_pct = progress_info["progress"]
-                        cloned = progress_info["cloned"]
-                        processed = progress_info["processed"]
-                        errors = progress_info["errors"]
-                        
-                        if status == "进行中":
-                            concurrent_status += f"🔄 T{j+1}: {sub_source}→{sub_target} | {progress_pct:.0f}% | ✅{cloned} ❌{errors}\n"
-                        elif status == "完成":
-                            concurrent_status += f"✅ T{j+1}: {sub_source}→{sub_target} | 完成 | ✅{cloned} ❌{errors}\n"
-                        elif status == "等待中":
-                            concurrent_status += f"⏸️ T{j+1}: {sub_source}→{sub_target} | 等待启动\n"
-                        else:
-                            concurrent_status += f"❌ T{j+1}: {sub_source}→{sub_target} | 错误 | ❌{errors}\n"
+                    concurrent_status = f"**并发任务状态** ({len(clone_tasks) if isinstance(clone_tasks, list) else 0} 个任务):\n"
+                    if isinstance(clone_tasks, list):
+                        for j, sub_task_item in enumerate(clone_tasks):
+                            # 修复：确保 source 和 target 是字符串类型
+                            source = sub_task_item['pair'].get('source', '')
+                            target = sub_task_item['pair'].get('target', '')
+                            if not isinstance(source, str):
+                                source = str(source) if source is not None else '未知来源'
+                            if not isinstance(target, str):
+                                target = str(target) if target is not None else '未知目标'
+                            
+                            sub_source = source[:12] + "..." if len(source) > 12 else source
+                            sub_target = target[:12] + "..." if len(target) > 12 else target
+                            
+                            progress_info = task_progress[j]
+                            status = progress_info["status"]
+                            progress_pct = progress_info["progress"]
+                            cloned = progress_info["cloned"]
+                            processed = progress_info["processed"]
+                            errors = progress_info["errors"]
+                            
+                            if status == "进行中":
+                                concurrent_status += f"🔄 T{j+1}: {sub_source}→{sub_target} | {progress_pct:.0f}% | ✅{cloned} ❌{errors}\n"
+                            elif status == "完成":
+                                concurrent_status += f"✅ T{j+1}: {sub_source}→{sub_target} | 完成 | ✅{cloned} ❌{errors}\n"
+                            elif status == "等待中":
+                                concurrent_status += f"⏸️ T{j+1}: {sub_source}→{sub_target} | 等待启动\n"
+                            else:
+                                concurrent_status += f"❌ T{j+1}: {sub_source}→{sub_target} | 错误 | ❌{errors}\n"
                     
                     progress_text = (
                         f"🚀 **老湿姬2.0** `{task_id_short}` **并发进行中**\n\n"
@@ -6424,7 +7556,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     logging.debug(f"⏱️ 子任务 {i+1} 最小延迟 {min_delay} 秒（避免API限流）")
                     await asyncio.sleep(min_delay)
             
-            logging.info(f"🔄 并发子任务 {i+1}/{len(clone_tasks)} 开始: {source} -> {target}")
+            logging.info(f"🔄 并发子任务 {i+1}/{len(clone_tasks) if isinstance(clone_tasks, list) else 0} 开始: {source} -> {target}")
             print(f"[DEBUG] 子任务 {i+1} 开始: {source} -> {target}")  # 调试用
             task_progress[i]["status"] = "进行中"
             
@@ -6519,21 +7651,22 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         # 创建真正的Task对象，而不是协程
         max_concurrent_tasks = 5  # 保守配置：单任务内5个频道对同时并发（从20降低）
         
-        if len(clone_tasks) > max_concurrent_tasks:
+        if isinstance(clone_tasks, list) and len(clone_tasks) > max_concurrent_tasks:
             logging.warning(f"⚠️ 任务数量({len(clone_tasks)})超过最大并发数({max_concurrent_tasks})，将分批执行")
             print(f"[性能优化] 任务数量: {len(clone_tasks)}, 最大并发: {max_concurrent_tasks}")
         
         # 分批创建任务，避免同时启动过多任务
         tasks = []
-        for i, sub_task in enumerate(clone_tasks):
-            if i >= max_concurrent_tasks:
-                # 超出并发限制的任务延迟启动
-                delay = (i // max_concurrent_tasks) * 2  # 每批延迟2秒（从5秒大幅降低）
-                logging.info(f"⏱️ 子任务 {i+1} 将在 {delay} 秒后启动（超出并发限制）")
-                print(f"[性能优化] 子任务 {i+1} 延迟启动: {delay}秒")
-            
-            subtask = asyncio.create_task(process_subtask(i, sub_task))
-            tasks.append(subtask)
+        if isinstance(clone_tasks, list):
+            for i, sub_task in enumerate(clone_tasks):
+                if i >= max_concurrent_tasks:
+                    # 超出并发限制的任务延迟启动
+                    delay = (i // max_concurrent_tasks) * 2  # 每批延迟2秒（从5秒大幅降低）
+                    logging.info(f"⏱️ 子任务 {i+1} 将在 {delay} 秒后启动（超出并发限制）")
+                    print(f"[性能优化] 子任务 {i+1} 延迟启动: {delay}秒")
+                
+                subtask = asyncio.create_task(process_subtask(i, sub_task))
+                tasks.append(subtask)
         
         # 添加定期状态更新任务
         async def periodic_status_update():
@@ -6556,7 +7689,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     except Exception as update_error:
                         logging.warning(f"定期状态更新失败: {update_error}")
                     
-                    # 额外检查：如果进度长时间没有变化，强制刷新
+                    # 额外检查：如果进度长时间没有变化，强制刷新（减少日志输出）
                     current_time = time.time()
                     for i, progress in task_progress.items():
                         # 跳过已完成或错误状态的任务
@@ -6565,7 +7698,8 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                             
                         last_update = progress.get("last_update_time", 0)
                         if current_time - last_update > 10:  # 10秒没有更新
-                            logging.warning(f"任务 {i+1} 进度长时间未更新，强制刷新")
+                            # 减少日志输出，只在debug级别记录
+                            logging.debug(f"任务 {i+1} 进度长时间未更新，强制刷新")
                             # 强制触发进度更新
                             progress["force_refresh"] = True
                     
@@ -6666,7 +7800,7 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
                     "errors": progress_info.get("errors", 0),
                     "cloned_count": progress_info.get("cloned", 0),  # 兼容旧格式
                     "processed_count": progress_info.get("processed", 0),  # 兼容旧格式
-                    "current_offset_id": progress_info.get("current_offset_id", clone_tasks[task_idx]['start_id'] if task_idx < len(clone_tasks) else 0)
+                    "current_offset_id": progress_info.get("current_offset_id", clone_tasks[task_idx]['start_id'] if isinstance(clone_tasks, list) and task_idx < len(clone_tasks) else 0)
                 }
                 converted_progress[f"sub_task_{task_idx}"] = converted_progress[str(task_idx)]
             
@@ -6708,50 +7842,51 @@ async def start_cloning_with_new_engine(client, message, user_id, task):
         if str(user_id) not in user_history:
             user_history[str(user_id)] = []
         
-        for i, sub_task in enumerate(clone_tasks):
-            # 获取准确的进度数据
-            sub_progress = task_progress.get(i, {}) or task_progress.get(f"sub_task_{i}", {})
-            
-            if was_cancelled and sub_progress:
-                # 取消的任务：使用实际进度
-                sub_cloned = sub_progress.get("cloned_count", 0) or sub_progress.get("cloned", 0)
-                sub_processed = sub_progress.get("processed_count", 0) or sub_progress.get("processed", 0)
-            else:
-                # 完成的任务：使用实际统计数据
-                sub_cloned = total_stats['successfully_cloned'] // len(clone_tasks) if len(clone_tasks) > 0 else 0
-                sub_processed = total_stats['total_processed'] // len(clone_tasks) if len(clone_tasks) > 0 else 0
-            
-            # 计算实际范围
-            start_id = sub_task['start_id']
-            end_id = sub_task['end_id']
-            total_range = end_id - start_id + 1
-            
-            # 获取详细统计信息
-            msg_stats = sub_progress.get("message_stats", {}) if sub_progress else {}
-            photo_count = msg_stats.get("photo_count", 0)
-            video_count = msg_stats.get("video_count", 0)
-            text_count = msg_stats.get("text_count", 0)
-            media_group_count = msg_stats.get("media_group_count", 0)
-            
-            user_history[str(user_id)].append({
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                "source": sub_task['pair']['source'],
-                "target": sub_task['pair']['target'],
-                "start_id": start_id,
-                "end_id": end_id,
-                "total_range": total_range,
-                "cloned_count": sub_cloned,
-                "processed_count": sub_processed,
-                "engine": "老湿姬2.0",
-                "duplicates_skipped": total_stats.get('duplicates_skipped', 0) // len(clone_tasks) if len(clone_tasks) > 0 else 0,
-                "status": "取消" if was_cancelled else "完成",
-                "runtime": f"{total_elapsed:.1f}秒",
-                # 详细统计
-                "photo_count": photo_count,
-                "video_count": video_count,
-                "text_count": text_count,
-                "media_group_count": media_group_count
-            })
+        if isinstance(clone_tasks, list):
+            for i, sub_task in enumerate(clone_tasks):
+                # 获取准确的进度数据
+                sub_progress = task_progress.get(i, {}) or task_progress.get(f"sub_task_{i}", {})
+                
+                if was_cancelled and sub_progress:
+                    # 取消的任务：使用实际进度
+                    sub_cloned = sub_progress.get("cloned_count", 0) or sub_progress.get("cloned", 0)
+                    sub_processed = sub_progress.get("processed_count", 0) or sub_progress.get("processed", 0)
+                else:
+                    # 完成的任务：使用实际统计数据
+                    sub_cloned = total_stats['successfully_cloned'] // len(clone_tasks) if isinstance(clone_tasks, list) and len(clone_tasks) > 0 else 0
+                    sub_processed = total_stats['total_processed'] // len(clone_tasks) if isinstance(clone_tasks, list) and len(clone_tasks) > 0 else 0
+                
+                # 计算实际范围
+                start_id = sub_task['start_id']
+                end_id = sub_task['end_id']
+                total_range = end_id - start_id + 1
+                
+                # 获取详细统计信息
+                msg_stats = sub_progress.get("message_stats", {}) if sub_progress else {}
+                photo_count = msg_stats.get("photo_count", 0)
+                video_count = msg_stats.get("video_count", 0)
+                text_count = msg_stats.get("text_count", 0)
+                media_group_count = msg_stats.get("media_group_count", 0)
+                
+                user_history[str(user_id)].append({
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    "source": sub_task['pair']['source'],
+                    "target": sub_task['pair']['target'],
+                    "start_id": start_id,
+                    "end_id": end_id,
+                    "total_range": total_range,
+                    "cloned_count": sub_cloned,
+                    "processed_count": sub_processed,
+                    "engine": "老湿姬2.0",
+                    "duplicates_skipped": total_stats.get('duplicates_skipped', 0) // len(clone_tasks) if isinstance(clone_tasks, list) and len(clone_tasks) > 0 else 0,
+                    "status": "取消" if was_cancelled else "完成",
+                    "runtime": f"{total_elapsed:.1f}秒",
+                    # 详细统计
+                    "photo_count": photo_count,
+                    "video_count": video_count,
+                    "text_count": text_count,
+                    "media_group_count": media_group_count
+                })
         
         save_history()
         
@@ -7083,6 +8218,393 @@ async def set_pair_replacement(message, user_id, text):
     ]
     
     await message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+# ==================== 频道组搬运控制功能 ====================
+async def toggle_pair_comment_forwarding(message, user_id, pair_id):
+    """切换频道组的评论区搬运功能"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.setdefault("custom_filters", {})
+    current_status = custom_filters.get("enable_comment_forwarding", False)
+    custom_filters["enable_comment_forwarding"] = not current_status
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["enable_comment_forwarding"] else "❌ 关闭"
+    text = f"🎯 **频道组评论区搬运设置**\n\n"
+    text += f"📂 **频道组**: `{pair['source']}` ➜ `{pair['target']}`\n"
+    text += f"📋 **当前状态**: {status_text}\n\n"
+    
+    if custom_filters["enable_comment_forwarding"]:
+        text += "💡 **说明**: 该频道组现在将搬运评论区的内容。"
+    else:
+        text += "💡 **说明**: 该频道组现在只搬运频道主发布的内容。"
+    
+    buttons = [
+        [InlineKeyboardButton("🔙 返回过滤设置", callback_data=f"manage_pair_filters:{pair_id}")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+async def toggle_pair_channel_owner_only(message, user_id, pair_id):
+    """切换频道组的只搬运频道主功能"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.setdefault("custom_filters", {})
+    current_status = custom_filters.get("channel_owner_only", False)
+    custom_filters["channel_owner_only"] = not current_status
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["channel_owner_only"] else "❌ 关闭"
+    text = f"👑 **频道组只搬运频道主设置**\n\n"
+    text += f"📂 **频道组**: `{pair['source']}` ➜ `{pair['target']}`\n"
+    text += f"📋 **当前状态**: {status_text}\n\n"
+    
+    if custom_filters["channel_owner_only"]:
+        text += "💡 **说明**: 该频道组现在只搬运频道主发布的内容。"
+    else:
+        text += "💡 **说明**: 该频道组现在搬运所有用户的内容。"
+    
+    buttons = [
+        [InlineKeyboardButton("🔙 返回过滤设置", callback_data=f"manage_pair_filters:{pair_id}")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+async def toggle_pair_media_only_mode(message, user_id, pair_id):
+    """切换频道组的只搬运视频图片功能"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.setdefault("custom_filters", {})
+    current_status = custom_filters.get("media_only_mode", False)
+    custom_filters["media_only_mode"] = not current_status
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["media_only_mode"] else "❌ 关闭"
+    text = f"🎬 **频道组只搬运视频图片设置**\n\n"
+    text += f"📂 **频道组**: `{pair['source']}` ➜ `{pair['target']}`\n"
+    text += f"📋 **当前状态**: {status_text}\n\n"
+    
+    if custom_filters["media_only_mode"]:
+        text += "💡 **说明**: 该频道组现在只搬运包含视频或图片的消息。"
+    else:
+        text += "💡 **说明**: 该频道组现在搬运所有类型的内容。"
+    
+    buttons = [
+        [InlineKeyboardButton("🔙 返回过滤设置", callback_data=f"manage_pair_filters:{pair_id}")]
+    ]
+    
+    await safe_edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+# ==================== 频道组专用过滤设置的切换函数 ====================
+async def manage_pair_filters(message, user_id, pair_id):
+    """显示频道组专用过滤设置管理菜单"""
+    await show_pair_filter_menu(message, user_id, pair_id)
+
+async def pair_toggle_links(message, user_id, pair_id):
+    """切换频道组HTTP链接移除设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("remove_links", False)
+    custom_filters["remove_links"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["remove_links"] else "❌ 关闭"
+    text = f"🔗 **频道组HTTP链接移除设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"🔗 **HTTP链接移除**: {status_text}\n\n"
+    
+    if custom_filters["remove_links"]:
+        text += "💡 **说明**: 该频道组现在会自动移除HTTP链接。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留HTTP链接。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回文本内容移除设置", callback_data=f"pair_filter_content:{pair_id}")
+        ]]))
+
+async def pair_toggle_magnet_links(message, user_id, pair_id):
+    """切换频道组磁力链接移除设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("remove_magnet_links", False)
+    custom_filters["remove_magnet_links"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["remove_magnet_links"] else "❌ 关闭"
+    text = f"🧲 **频道组磁力链接移除设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"🧲 **磁力链接移除**: {status_text}\n\n"
+    
+    if custom_filters["remove_magnet_links"]:
+        text += "💡 **说明**: 该频道组现在会自动移除磁力链接。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留磁力链接。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回文本内容移除设置", callback_data=f"pair_filter_content:{pair_id}")
+        ]]))
+
+async def pair_toggle_all_links(message, user_id, pair_id):
+    """切换频道组所有链接移除设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("remove_all_links", False)
+    custom_filters["remove_all_links"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["remove_all_links"] else "❌ 关闭"
+    text = f"🌐 **频道组所有链接移除设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"🌐 **所有链接移除**: {status_text}\n\n"
+    
+    if custom_filters["remove_all_links"]:
+        text += "💡 **说明**: 该频道组现在会自动移除所有类型的链接。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留所有类型的链接。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回文本内容移除设置", callback_data=f"pair_filter_content:{pair_id}")
+        ]]))
+
+async def pair_toggle_hashtags(message, user_id, pair_id):
+    """切换频道组标签移除设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("remove_hashtags", False)
+    custom_filters["remove_hashtags"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["remove_hashtags"] else "❌ 关闭"
+    text = f"🏷 **频道组标签移除设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"🏷 **标签移除**: {status_text}\n\n"
+    
+    if custom_filters["remove_hashtags"]:
+        text += "💡 **说明**: 该频道组现在会自动移除#标签。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留#标签。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回文本内容移除设置", callback_data=f"pair_filter_content:{pair_id}")
+        ]]))
+
+async def pair_toggle_usernames(message, user_id, pair_id):
+    """切换频道组用户名移除设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("remove_usernames", False)
+    custom_filters["remove_usernames"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["remove_usernames"] else "❌ 关闭"
+    text = f"👤 **频道组用户名移除设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"👤 **用户名移除**: {status_text}\n\n"
+    
+    if custom_filters["remove_usernames"]:
+        text += "💡 **说明**: 该频道组现在会自动移除@用户名。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留@用户名。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回文本内容移除设置", callback_data=f"pair_filter_content:{pair_id}")
+        ]]))
+
+async def pair_toggle_photo(message, user_id, pair_id):
+    """切换频道组图片过滤设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("remove_photos", False)
+    custom_filters["remove_photos"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["remove_photos"] else "❌ 关闭"
+    text = f"🖼 **频道组图片过滤设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"🖼 **图片过滤**: {status_text}\n\n"
+    
+    if custom_filters["remove_photos"]:
+        text += "💡 **说明**: 该频道组现在会自动过滤图片。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留图片。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回媒体过滤设置", callback_data=f"pair_filter_media:{pair_id}")
+        ]]))
+
+async def pair_toggle_video(message, user_id, pair_id):
+    """切换频道组视频过滤设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("remove_videos", False)
+    custom_filters["remove_videos"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["remove_videos"] else "❌ 关闭"
+    text = f"🎬 **频道组视频过滤设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"🎬 **视频过滤**: {status_text}\n\n"
+    
+    if custom_filters["remove_videos"]:
+        text += "💡 **说明**: 该频道组现在会自动过滤视频。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留视频。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回媒体过滤设置", callback_data=f"pair_filter_media:{pair_id}")
+        ]]))
+
+async def pair_toggle_filter_buttons(message, user_id, pair_id):
+    """切换频道组按钮过滤设置"""
+    config = user_configs.get(str(user_id), {})
+    channel_pairs = config.get("channel_pairs", [])
+    
+    if pair_id >= len(channel_pairs):
+        await safe_edit_or_reply(message, "❌ 频道组不存在。")
+        return
+    
+    pair = channel_pairs[pair_id]
+    custom_filters = pair.get("custom_filters", {})
+    
+    if not custom_filters:
+        await safe_edit_or_reply(message, "❌ 该频道组尚未启用专用过滤设置。")
+        return
+    
+    current_status = custom_filters.get("filter_buttons", False)
+    custom_filters["filter_buttons"] = not current_status
+    
+    save_configs()
+    
+    status_text = "✅ 开启" if custom_filters["filter_buttons"] else "❌ 关闭"
+    text = f"🚫 **频道组按钮过滤设置**\n\n"
+    text += f"📂 **频道组**: `{pair.get('source', '未知')}` ➜ `{pair.get('target', '未知')}`\n\n"
+    text += f"🚫 **按钮过滤**: {status_text}\n\n"
+    
+    if custom_filters["filter_buttons"]:
+        text += "💡 **说明**: 该频道组现在会自动过滤按钮。\n"
+    else:
+        text += "💡 **说明**: 该频道组现在会保留按钮。\n"
+    
+    await safe_edit_or_reply(message, text, 
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 返回按钮过滤设置", callback_data=f"pair_filter_buttons:{pair_id}")
+        ]]))
 
 # ==================== 启动机器人 ====================
 if __name__ == "__main__":

@@ -22,15 +22,29 @@ class MessageFingerprint:
     media_type: str
     file_id: Optional[str]
     timestamp: float
+    # 新增：评论特殊标识
+    is_comment: bool = False
+    comment_user_id: Optional[int] = None
     
     def __hash__(self):
         """使对象可以被哈希，可以放入set中"""
         return hash((self.content_hash, self.media_type, self.file_id))
     
     def __eq__(self, other):
-        """定义相等比较"""
+        """定义相等比较 - 优化版本，支持评论去重"""
         if not isinstance(other, MessageFingerprint):
             return False
+        
+        # 如果一个是评论，一个是主消息，则不同
+        if self.is_comment != other.is_comment:
+            return False
+        
+        # 如果都是评论，需要检查用户ID
+        if self.is_comment and other.is_comment:
+            if self.comment_user_id != other.comment_user_id:
+                return False
+        
+        # 其他特征比较
         return (self.content_hash == other.content_hash and 
                 self.media_type == other.media_type and 
                 self.file_id == other.file_id)
@@ -59,12 +73,21 @@ class MessageDeduplicator:
         self.load_fingerprints()
     
     def _generate_content_hash(self, message: Message, processed_text: str = None) -> str:
-        """生成内容哈希 - 简化版本提高性能"""
+        """生成内容哈希 - 优化版本，支持评论去重"""
         # 快速特征提取
         text_content = processed_text or message.text or message.caption or ""
         
         # 基础特征
         features = [f"id:{message.id}"]
+        
+        # 新增：区分评论和主消息
+        if hasattr(message, 'from_user') and message.from_user:
+            # 这是评论，添加用户ID作为特征
+            features.append(f"comment_user:{message.from_user.id}")
+            features.append(f"comment_type:reply")
+        else:
+            # 这是主消息
+            features.append(f"comment_type:main")
         
         if text_content.strip():
             # 只使用文本长度和前50字符，提高性能
@@ -76,6 +99,8 @@ class MessageDeduplicator:
             features.append(f"fwd:{message.forward_from.id}")
         if message.reply_to_message:
             features.append(f"reply:{message.reply_to_message.id}")
+            # 新增：为回复添加更精确的特征
+            features.append(f"reply_to_id:{message.reply_to_message.id}")
         
         # 简化的媒体特征
         if message.photo:
@@ -113,7 +138,7 @@ class MessageDeduplicator:
             return "unknown", None
     
     def create_fingerprint(self, message: Message, processed_text: str = None) -> Optional[MessageFingerprint]:
-        """创建消息指纹"""
+        """创建消息指纹 - 优化版本，支持评论去重"""
         # 安全检查
         if not message or not hasattr(message, 'id') or not hasattr(message, 'chat'):
             logging.warning("无法为无效消息创建指纹")
@@ -123,32 +148,149 @@ class MessageDeduplicator:
             content_hash = self._generate_content_hash(message, processed_text)
             media_type, file_id = self._get_media_info(message)
             
+            # 新增：为评论添加特殊标识
+            is_comment = hasattr(message, 'from_user') and message.from_user is not None
+            comment_id = message.from_user.id if is_comment else None
+            
             return MessageFingerprint(
                 message_id=message.id,
                 chat_id=message.chat.id,
                 content_hash=content_hash,
                 media_type=media_type,
                 file_id=file_id,
-                timestamp=time.time()
+                timestamp=time.time(),
+                # 新增：评论特殊标识
+                is_comment=is_comment,
+                comment_user_id=comment_id
             )
         except Exception as e:
             logging.error(f"创建消息指纹失败: {e}")
             return None
     
     def is_duplicate(self, source_chat_id: int, target_chat_id: int, fingerprint: MessageFingerprint) -> bool:
-        """检查是否为重复消息 - 优化版本"""
+        """检查是否为重复消息 - 优化版本，支持评论去重"""
         key = f"{source_chat_id}_{target_chat_id}"
         
         if key not in self.fingerprints:
             self.fingerprints[key] = set()
             return False
         
-        # 快速检查：直接检查指纹对象是否存在（利用__eq__方法）
+        # 新增：评论使用更宽松的去重规则
+        if fingerprint.is_comment:
+            return self._is_comment_duplicate(source_chat_id, target_chat_id, fingerprint)
+        
+        # 主消息使用严格去重
         if fingerprint in self.fingerprints[key]:
-            logging.debug(f"发现重复消息: {fingerprint.content_hash[:8]}...")
+            logging.debug(f"发现重复主消息: {fingerprint.content_hash[:8]}...")
             return True
         
         return False
+    
+    def _is_comment_duplicate(self, source_chat_id: int, target_chat_id: int, fingerprint: MessageFingerprint) -> bool:
+        """检查评论是否为重复 - 使用更宽松的规则"""
+        key = f"{source_chat_id}_{target_chat_id}"
+        
+        if key not in self.fingerprints:
+            return False
+        
+        # 评论去重规则：
+        # 1. 检查是否有完全相同的评论（用户ID + 内容）
+        # 2. 允许相似内容的评论通过（避免误判）
+        # 3. 支持配置化的去重严格程度
+        
+        # 获取配置中的评论去重设置
+        config = getattr(self, 'config', {})
+        comment_dedup_mode = config.get('comment_dedup_mode', 'normal')  # normal, strict, loose
+        
+        for existing_fp in self.fingerprints[key]:
+            if existing_fp.is_comment:
+                # 基础检查：用户ID + 内容完全匹配
+                if (existing_fp.comment_user_id == fingerprint.comment_user_id and
+                    existing_fp.content_hash == fingerprint.content_hash):
+                    logging.debug(f"发现重复评论: 用户 {fingerprint.comment_user_id} 的相同内容")
+                    return True
+                
+                # 严格模式：检查相似内容
+                if comment_dedup_mode == 'strict':
+                    # 检查内容相似度（简化版本）
+                    if existing_fp.comment_user_id == fingerprint.comment_user_id:
+                        # 如果同一用户发送了相似内容，可能是重复
+                        content_similarity = self._calculate_content_similarity(
+                            existing_fp.content_hash, fingerprint.content_hash
+                        )
+                        if content_similarity > 0.8:  # 80%相似度阈值
+                            logging.debug(f"严格模式：发现相似评论: 用户 {fingerprint.comment_user_id}")
+                            return True
+        
+        logging.debug(f"评论通过去重检查: 用户 {fingerprint.comment_user_id} (模式: {comment_dedup_mode})")
+        return False
+    
+    def _calculate_content_similarity(self, hash1: str, hash2: str) -> float:
+        """计算内容相似度（简化版本）"""
+        try:
+            # 简单的哈希相似度计算
+            if hash1 == hash2:
+                return 1.0
+            
+            # 计算哈希字符串的相似度
+            if len(hash1) != len(hash2):
+                return 0.0
+            
+            matches = sum(1 for a, b in zip(hash1, hash2) if a == b)
+            return matches / len(hash1)
+        except Exception:
+            return 0.0
+    
+    def _learn_comment_pattern(self, chat_id: str, base_message_id: int, found_comment_ids: List[int]):
+        """学习评论ID模式，用于未来推测"""
+        try:
+            if not hasattr(self, '_comment_patterns'):
+                self._comment_patterns = {}
+            
+            if chat_id not in self._comment_patterns:
+                self._comment_patterns[chat_id] = []
+            
+            # 计算评论ID相对于主消息ID的偏移量
+            comment_offsets = []
+            for comment_id in found_comment_ids:
+                offset = comment_id - base_message_id
+                comment_offsets.append(offset)
+            
+            # 记录成功的模式
+            pattern = {
+                'base_id': base_message_id,
+                'comment_offsets': comment_offsets,
+                'timestamp': time.time(),
+                'success_count': 1
+            }
+            
+            # 检查是否已有相似模式
+            existing_pattern = None
+            for existing in self._comment_patterns[chat_id]:
+                if existing['base_id'] == base_message_id:
+                    existing_pattern = existing
+                    break
+            
+            if existing_pattern:
+                # 更新现有模式
+                existing_pattern['comment_offsets'].extend(comment_offsets)
+                existing_pattern['success_count'] += 1
+                existing_pattern['timestamp'] = time.time()
+                logging.info(f"更新评论模式: 频道 {chat_id}, 消息 {base_message_id}, 成功次数: {existing_pattern['success_count']}")
+            else:
+                # 添加新模式
+                self._comment_patterns[chat_id].append(pattern)
+                logging.info(f"学习新评论模式: 频道 {chat_id}, 消息 {base_message_id}, 偏移量: {comment_offsets}")
+            
+            # 限制模式数量，避免内存占用过多
+            if len(self._comment_patterns[chat_id]) > 100:
+                # 保留最成功的模式
+                self._comment_patterns[chat_id].sort(key=lambda x: x['success_count'], reverse=True)
+                self._comment_patterns[chat_id] = self._comment_patterns[chat_id][:50]
+                logging.info(f"清理评论模式缓存: 频道 {chat_id}, 保留前50个最成功的模式")
+                
+        except Exception as e:
+            logging.error(f"学习评论模式失败: {e}")
     
     def add_fingerprint(self, source_chat_id: int, target_chat_id: int, fingerprint: MessageFingerprint):
         """添加消息指纹"""
@@ -343,6 +485,29 @@ class RobustCloningEngine:
             self.processed_message_ids[task_key] = set()
         self.processed_message_ids[task_key].add(message_id)
     
+    def _is_media_group_processed(self, task_key: str, media_group_id: str) -> bool:
+        """检查媒体组是否已处理过"""
+        try:
+            if not hasattr(self, 'processed_media_groups'):
+                self.processed_media_groups = {}
+            processed_groups = self.processed_media_groups.get(task_key, set())
+            return media_group_id in processed_groups
+        except Exception as e:
+            logging.error(f"检查媒体组处理状态失败: {e}")
+            return False
+    
+    def _mark_media_group_processed(self, task_key: str, media_group_id: str) -> None:
+        """标记媒体组为已处理"""
+        try:
+            if not hasattr(self, 'processed_media_groups'):
+                self.processed_media_groups[task_key] = set()
+            if task_key not in self.processed_media_groups:
+                self.processed_media_groups[task_key] = set()
+            self.processed_media_groups[task_key].add(media_group_id)
+            logging.debug(f"标记媒体组 {media_group_id} 为已处理")
+        except Exception as e:
+            logging.error(f"标记媒体组处理状态失败: {e}")
+    
     async def clone_messages_robust(
         self,
         source_chat_id: str,
@@ -434,6 +599,164 @@ class RobustCloningEngine:
                     if not isinstance(messages, list):
                         messages = [messages]
                     
+                    # 新增：如果启用了评论区搬运，尝试获取相关评论
+                    if config.get("enable_comment_forwarding", False):
+                        logging.info(f"🔍 评论区搬运已启用，开始获取评论...")
+                        
+                        # 获取评论获取策略配置
+                        comment_strategy = config.get("comment_fetch_strategy", "aggressive")  # 默认使用激进模式
+                        logging.info(f"🔍 评论获取策略: {comment_strategy}")
+                        
+                        # 新增：调试信息
+                        logging.info(f"🔍 当前批次消息数量: {len(messages)}")
+                        logging.info(f"🔍 消息ID范围: {[msg.id for msg in messages if msg and hasattr(msg, 'id')]}")
+                        
+                        # 新增：评论搬运调试开关
+                        comment_debug = config.get("comment_debug", True)  # 默认开启调试
+                        if comment_debug:
+                            logging.info(f"🔍 评论搬运调试模式已启用")
+                            
+                            # 新增：评论搬运测试模式
+                            comment_test_mode = config.get("comment_test_mode", False)
+                            if comment_test_mode:
+                                logging.info(f"🧪 评论搬运测试模式已启用，将尝试所有获取方法")
+                        
+                        # 🔧 新增：智能评论区识别
+                        comment_detection_mode = config.get("comment_detection_mode", "smart")  # smart, aggressive, manual
+                        logging.info(f"🔍 评论区识别模式: {comment_detection_mode}")
+                        
+                        if comment_detection_mode == "manual":
+                            # 手动模式：只处理用户指定的消息ID
+                            manual_comment_ids = config.get("manual_comment_message_ids", [])
+                            if manual_comment_ids:
+                                logging.info(f"🔍 手动模式：只处理指定的消息ID: {manual_comment_ids}")
+                                messages_to_check = [msg for msg in messages if msg and hasattr(msg, 'id') and msg.id in manual_comment_ids]
+                            else:
+                                logging.warning(f"⚠️ 手动模式已启用，但未指定消息ID，跳过评论获取")
+                                messages_to_check = []
+                        else:
+                            # 智能模式：自动识别可能有评论的消息
+                            messages_to_check = await self._identify_messages_with_comments(messages, comment_detection_mode)
+                            logging.info(f"🔍 智能识别：找到 {len(messages_to_check)} 条可能有评论的消息")
+                        
+                        try:
+                            # 获取每条消息的评论
+                            comment_count = 0
+                            all_comments = []  # 收集所有评论
+                            
+                            # 🔧 修复：只处理识别出的可能有评论的消息
+                            if not messages_to_check:
+                                logging.info(f"ℹ️ 没有识别出可能有评论的消息，跳过评论获取")
+                            else:
+                                logging.info(f"🔍 开始为 {len(messages_to_check)} 条消息获取评论...")
+                                
+                                for message in messages_to_check:
+                                    if message and hasattr(message, 'id'):
+                                        logging.debug(f"🔍 正在为消息 {message.id} 获取评论...")
+                                        
+                                        # 根据策略获取评论
+                                        comments = []
+                                        if comment_strategy in ["smart", "aggressive"]:
+                                            logging.debug(f"🔍 尝试方法1: _get_message_comments")
+                                            comments = await self._get_message_comments(source_chat_id, message.id)
+                                            logging.debug(f"🔍 方法1结果: {len(comments) if comments else 0} 条评论")
+                                            
+                                            # 新增：详细调试信息
+                                            if comment_debug and comments:
+                                                comment_ids = [comment.id for comment in comments]
+                                                logging.info(f"🔍 方法1成功获取评论: {comment_ids}")
+                                        
+                                        # 如果第一种方法没有找到评论，尝试替代方法
+                                        if not comments and comment_strategy in ["smart", "aggressive"]:
+                                            logging.debug(f"🔍 方法1未找到评论，尝试方法2: _get_comments_alternative")
+                                            comments = await self._get_comments_alternative(source_chat_id, message.id)
+                                            logging.debug(f"🔍 方法2结果: {len(comments) if comments else 0} 条评论")
+                                            
+                                            # 新增：详细调试信息
+                                            if comment_debug and comments:
+                                                comment_ids = [comment.id for comment in comments]
+                                                logging.info(f"🔍 方法2成功获取评论: {comment_ids}")
+                                        
+                                        # 激进模式：尝试更多方法
+                                        if not comments and comment_strategy == "aggressive":
+                                            logging.debug(f"🔍 激进模式：尝试方法3: 直接获取回复")
+                                            try:
+                                                # 直接尝试获取消息的回复
+                                                direct_replies = await self.client.get_messages(
+                                                    source_chat_id,
+                                                    message.id,
+                                                    replies=True,
+                                                    limit=50
+                                                )
+                                                if direct_replies and isinstance(direct_replies, list):
+                                                    comments = [reply for reply in direct_replies if reply and reply.id != message.id]
+                                                    logging.debug(f"🔍 方法3结果: {len(comments)} 条评论")
+                                                    
+                                                    # 新增：详细调试信息
+                                                    if comment_debug and comments:
+                                                        comment_ids = [comment.id for comment in comments]
+                                                        logging.info(f"🔍 方法3成功获取评论: {comment_ids}")
+                                            except Exception as e:
+                                                logging.debug(f"🔍 方法3失败: {e}")
+                                        
+                                        if comments:
+                                            # 收集评论，稍后统一添加
+                                            all_comments.extend(comments)
+                                            comment_count += len(comments)
+                                            logging.info(f"✅ 为消息 {message.id} 找到 {len(comments)} 条评论")
+                                        else:
+                                            logging.debug(f"消息 {message.id} 没有找到评论")
+                            
+                            # 统一添加所有评论到消息列表
+                            if all_comments:
+                                messages.extend(all_comments)
+                                logging.info(f"🎯 本次批次总共获取到 {comment_count} 条评论，已添加到搬运队列")
+                                
+                                # 新增：评论ID识别统计报告
+                                await self._report_comment_identification_stats(source_chat_id)
+                                
+                                # 新增：评论搬运统计
+                                comment_ids = [comment.id for comment in all_comments]
+                                logging.info(f"📊 评论搬运统计:")
+                                logging.info(f"📝 评论ID列表: {comment_ids}")
+                                logging.info(f"📊 总消息数: {len(messages)} (主消息: {len(messages) - len(all_comments)}, 评论: {len(all_comments)})")
+                                
+                                # 新增：评论搬运总结
+                                if comment_debug:
+                                    logging.info("=" * 50)
+                                    logging.info("🎯 评论搬运成功总结")
+                                    logging.info(f"📂 频道: {source_chat_id}")
+                                    if len(messages) > len(all_comments):
+                                        main_message_ids = [msg.id for msg in messages[:len(messages)-len(all_comments)]]
+                                    else:
+                                        main_message_ids = []
+                                    logging.info(f"📝 主消息ID: {main_message_ids}")
+                                    logging.info(f"💬 评论ID: {comment_ids}")
+                                    logging.info(f"✅ 评论获取方法: 成功")
+                                    logging.info("=" * 50)
+                            else:
+                                logging.info(f"ℹ️ 本次批次没有找到任何评论")
+                                
+                                # 新增：评论访问权限检查
+                                if config.get("comment_fetch_strategy") == "aggressive":
+                                    logging.info(f"🔍 激进模式：检查评论访问权限...")
+                                    for message in messages:
+                                        if message and hasattr(message, 'id'):
+                                            try:
+                                                access_info = await self._check_comment_access(source_chat_id, message.id)
+                                                if not access_info["can_access"]:
+                                                    logging.warning(f"⚠️ 评论访问受限: {access_info['reason']}")
+                                                    for suggestion in access_info["suggestions"]:
+                                                        logging.info(f"💡 建议: {suggestion}")
+                                            except Exception as e:
+                                                logging.debug(f"评论访问检查失败: {e}")
+                                                continue
+                                
+                        except Exception as e:
+                            logging.warning(f"获取评论失败: {e}")
+                    else:
+                        logging.debug(f"ℹ️ 评论区搬运未启用，跳过评论获取")
+                    
                     # 过滤掉无效消息
                     valid_messages = [msg for msg in messages if msg is not None]
                     invalid_count = len(messages) - len(valid_messages)
@@ -517,6 +840,10 @@ class RobustCloningEngine:
                 except Exception as e:
                     logging.error(f"获取消息批次失败 {current_id}-{batch_end}: {e}")
                     stats["errors"] += batch_size
+                    
+                    # 修复：即使出现异常，也要确保ID正确更新
+                    logging.info(f"🔧 异常后ID修复：当前ID {current_id} -> {batch_end + 1}")
+                    current_id = batch_end + 1
                 
                 # 更新ID - 修复ID跳跃问题
                 if valid_messages:
@@ -541,6 +868,12 @@ class RobustCloningEngine:
                 if stats["total_processed"] % self.save_frequency == 0:
                     self._save_processed_ids(task_key)
                     self.deduplicator.save_fingerprints()
+                
+                # 新增：异常恢复检查
+                if current_id > end_id + 1000:
+                    logging.warning(f"⚠️ 检测到异常ID值: {current_id}，尝试恢复")
+                    current_id = min(current_id, end_id + 100)
+                    logging.info(f"🔧 ID恢复后: {current_id}")
         
         finally:
             # 最终保存
@@ -594,13 +927,25 @@ class RobustCloningEngine:
                                     processed_text, reply_markup = self._process_message_content(message, config)
                                     
                                     # 创建消息指纹
+                                    if not message or not hasattr(message, 'id'):
+                                        logging.warning(f"⚠️ 跳过无效消息对象")
+                                        stats["errors"] += 1
+                                        continue
+                                    
                                     fingerprint = self.deduplicator.create_fingerprint(message, processed_text)
                                     if not fingerprint:
+                                        logging.warning(f"⚠️ 创建消息指纹失败: {message.id}")
                                         stats["errors"] += 1
                                         continue
                                     
                                     # 检查重复
                                     if self.deduplicator.is_duplicate(message.chat.id, target_chat_id, fingerprint):
+                                        # 新增：区分评论和主消息的重复
+                                        if fingerprint.is_comment:
+                                            logging.info(f"⏭️ 跳过重复评论: {message.id} (用户: {fingerprint.comment_user_id})")
+                                        else:
+                                            logging.info(f"⏭️ 跳过重复主消息: {message.id}")
+                                        
                                         stats["duplicates_skipped"] += 1
                                         self._mark_message_processed(task_key, message.id)
                                         continue
@@ -670,6 +1015,47 @@ class RobustCloningEngine:
     
     def _should_filter_message(self, message: Message, config: Dict[str, Any]) -> bool:
         """检查消息是否应该被过滤 - 从主程序移植"""
+        # 新增：评论区搬运控制
+        enable_comment_forwarding = config.get("enable_comment_forwarding", False)
+        
+        # 如果关闭评论区搬运，只搬运频道主发布的内容
+        if not enable_comment_forwarding:
+            # 检查消息是否来自频道主
+            # 频道主发布的消息通常没有 from_user 字段，或者 from_user 是频道本身
+            if hasattr(message, 'from_user') and message.from_user:
+                # 如果消息有发送者信息，说明可能是评论或回复
+                logging.debug(f"消息 {message.id} 被评论区过滤: 非频道主发布 (from_user: {message.from_user.id})")
+                return True
+            else:
+                # 没有 from_user 字段，通常是频道主发布的内容
+                logging.debug(f"消息 {message.id} 通过评论区过滤: 频道主发布")
+        
+        # 新增：只搬运频道主信息
+        if config.get("channel_owner_only", False):
+            # 检查消息是否来自频道主
+            if hasattr(message, 'from_user') and message.from_user:
+                # 如果消息有发送者信息，说明不是频道主发布的
+                logging.debug(f"消息 {message.id} 被频道主过滤: 非频道主发布")
+                return True
+        
+        # 新增：只搬运媒体内容
+        if config.get("media_only_mode", False):
+            # 检查消息是否包含媒体内容
+            has_media = any([
+                message.photo,
+                message.video,
+                message.video_note,
+                message.animation,
+                message.document,
+                message.audio,
+                message.voice,
+                message.sticker
+            ])
+            
+            if not has_media:
+                logging.debug(f"消息 {message.id} 被媒体过滤: 不包含媒体内容")
+                return True
+        
         # 关键字过滤
         filter_keywords = config.get("filter_keywords", [])
         text_to_check = ""
@@ -677,9 +1063,10 @@ class RobustCloningEngine:
             text_to_check += message.caption.lower()
         if message.text:
             text_to_check += message.text.lower()
-        if any(keyword.lower() in text_to_check for keyword in filter_keywords):
-            logging.debug(f"消息 {message.id} 被关键字过滤: {filter_keywords}")
-            return True
+        if filter_keywords and isinstance(filter_keywords, (list, tuple)):
+            if any(isinstance(keyword, str) and keyword.lower() in text_to_check for keyword in filter_keywords):
+                logging.debug(f"消息 {message.id} 被关键字过滤: {filter_keywords}")
+                return True
 
         # 过滤带按钮的消息（支持策略）
         filter_buttons_enabled = config.get("filter_buttons")
@@ -691,7 +1078,7 @@ class RobustCloningEngine:
 
         # 文件类型过滤
         filter_extensions = config.get("file_filter_extensions", [])
-        if message.document and filter_extensions:
+        if message.document and filter_extensions and isinstance(filter_extensions, (list, tuple)):
             filename = getattr(message.document, 'file_name', '')
             if filename and '.' in filename:
                 ext = filename.lower().rsplit('.', 1)[1]
@@ -977,7 +1364,7 @@ class RobustCloningEngine:
         stats: dict, 
         task_key: str
     ) -> bool:
-        """处理媒体组，集成统一FloodWait管理"""
+        """处理媒体组，防止重复发送"""
         try:
             # 🔧 新增：发送前检查全局FloodWait限制
             if self.flood_wait_manager:
@@ -986,14 +1373,23 @@ class RobustCloningEngine:
             if not group_messages:
                 return False
             
-            # 检查是否所有消息都已处理过
-            all_processed = all(
-                self._is_message_processed(task_key, msg.id) for msg in group_messages
-            )
-            if all_processed:
-                stats["already_processed"] += len(group_messages)
-                logging.debug(f"跳过已处理的媒体组: {[msg.id for msg in group_messages]}")
-                return True
+            # 🔧 修复：检查是否已经处理过这个媒体组
+            media_group_id = group_messages[0].media_group_id if group_messages and hasattr(group_messages[0], 'media_group_id') else None
+            if media_group_id:
+                # 使用媒体组ID作为处理标识
+                if self._is_media_group_processed(task_key, media_group_id):
+                    stats["already_processed"] += len(group_messages)
+                    logging.debug(f"跳过已处理的媒体组: {media_group_id} (消息: {[msg.id for msg in group_messages]})")
+                    return True
+            else:
+                # 如果没有媒体组ID，检查单个消息
+                all_processed = all(
+                    self._is_message_processed(task_key, msg.id) for msg in group_messages
+                )
+                if all_processed:
+                    stats["already_processed"] += len(group_messages)
+                    logging.debug(f"跳过已处理的媒体组: {[msg.id for msg in group_messages]}")
+                    return True
             
             # 按消息ID排序，确保顺序正确
             group_messages.sort(key=lambda x: x.id)
@@ -1052,11 +1448,27 @@ class RobustCloningEngine:
                 stats["errors"] += len(group_messages)
                 return False
             
+            # 🔧 修复：发送前再次检查是否已处理
+            if media_group_id and self._is_media_group_processed(task_key, media_group_id):
+                logging.debug(f"媒体组 {media_group_id} 在发送前被标记为已处理，跳过")
+                return True
+            
             # 发送媒体组
             results = await self.client.send_media_group(
                 chat_id=target_chat_id,
                 media=media_list
             )
+            
+            # 🔧 修复：发送成功后立即标记为已处理
+            if results:
+                if media_group_id:
+                    self._mark_media_group_processed(task_key, media_group_id)
+                else:
+                    # 如果没有媒体组ID，标记所有消息
+                    for msg in group_messages:
+                        self._mark_message_processed(task_key, msg.id)
+                
+                logging.info(f"✅ 媒体组发送成功: {len(media_list)} 个媒体")
             
             # 如果有按钮需要添加，直接发送按钮（不添加额外文本）
             if reply_markup and results:
@@ -1394,6 +1806,12 @@ class RobustCloningEngine:
                 
                 # 检查重复
                 if self.deduplicator.is_duplicate(message.chat.id, target_chat_id, fingerprint):
+                    # 新增：区分评论和主消息的重复
+                    if fingerprint.is_comment:
+                        logging.info(f"⏭️ 批量处理跳过重复评论: {message.id} (用户: {fingerprint.comment_user_id})")
+                    else:
+                        logging.info(f"⏭️ 批量处理跳过重复主消息: {message.id}")
+                    
                     stats["duplicates_skipped"] += 1
                     self._mark_message_processed(task_key, message.id)
                     continue
@@ -1453,6 +1871,398 @@ class RobustCloningEngine:
             logging.error(f"❌ 批量发送消息 {message.id} 时出错: {e}")
             stats["errors"] += 1
             return False
+    
+    async def _get_message_comments(self, chat_id: str, message_id: int) -> List[Message]:
+        """获取指定消息的评论 - 简化版本，提高成功率"""
+        try:
+            comments = []
+            
+            # 方法1：直接尝试获取消息的回复（最可靠的方法）
+            try:
+                logging.debug(f"🔍 尝试直接获取消息 {message_id} 的回复")
+                
+                # 使用 get_messages 的 replies 参数
+                reply_messages = await self.client.get_messages(
+                    chat_id=chat_id,
+                    message_ids=message_id,
+                    replies=True,
+                    limit=50
+                )
+                
+                if reply_messages:
+                    if isinstance(reply_messages, list):
+                        for reply in reply_messages:
+                            if reply and reply.id != message_id:
+                                comments.append(reply)
+                                logging.debug(f"✅ 直接获取到回复: {reply.id}")
+                    else:
+                        # 单个消息的情况
+                        if reply_messages.id != message_id:
+                            comments.append(reply_messages)
+                            logging.debug(f"✅ 直接获取到回复: {reply_messages.id}")
+                
+                logging.info(f"🔍 方法1结果: 找到 {len(comments)} 条回复")
+                
+            except Exception as e:
+                logging.debug(f"🔍 方法1失败: {e}")
+            
+            # 方法2：如果方法1失败，尝试搜索回复
+            if not comments:
+                try:
+                    logging.debug(f"🔍 方法1未找到回复，尝试搜索回复")
+                    
+                    # 搜索可能包含回复关键词的消息
+                    search_queries = ["回复", "评论", "comment", "reply", "💬", "📝"]
+                    for query in search_queries:
+                        try:
+                            search_results = await self.client.search_messages(
+                                chat_id=chat_id,
+                                query=query,
+                                limit=50
+                            )
+                            
+                            for msg in search_results:
+                                if (msg and hasattr(msg, 'reply_to_message') and 
+                                    msg.reply_to_message and 
+                                    msg.reply_to_message.id == message_id):
+                                    comments.append(msg)
+                                    logging.debug(f"✅ 通过搜索找到回复: {msg.id}")
+                        except Exception as search_e:
+                            logging.debug(f"搜索查询 '{query}' 失败: {search_e}")
+                            continue
+                    
+                    logging.info(f"🔍 方法2结果: 找到 {len(comments)} 条回复")
+                    
+                except Exception as e:
+                    logging.debug(f"🔍 方法2失败: {e}")
+            
+            # 方法3：如果前两种方法都失败，尝试推测评论ID
+            if not comments:
+                try:
+                    logging.debug(f"🔍 前两种方法都失败，尝试推测评论ID")
+                    
+                    # 使用简化的推测逻辑
+                    possible_ids = []
+                    for offset in [-10, -5, -2, -1, 1, 2, 5, 10]:
+                        possible_id = message_id + offset
+                        if possible_id > 0:
+                            possible_ids.append(possible_id)
+                    
+                    if possible_ids:
+                        try:
+                            batch_comments = await self.client.get_messages(chat_id, possible_ids)
+                            if isinstance(batch_comments, list):
+                                for comment in batch_comments:
+                                    if (comment and hasattr(comment, 'reply_to_message') and
+                                        comment.reply_to_message and 
+                                        comment.reply_to_message.id == message_id):
+                                        comments.append(comment)
+                                        logging.debug(f"✅ 通过推测ID找到回复: {comment.id}")
+                            elif batch_comments and hasattr(batch_comments, 'reply_to_message'):
+                                if (batch_comments.reply_to_message and 
+                                    batch_comments.reply_to_message.id == message_id):
+                                    comments.append(batch_comments)
+                                    logging.debug(f"✅ 通过推测ID找到回复: {batch_comments.id}")
+                        except Exception as e:
+                            logging.debug(f"推测ID获取失败: {e}")
+                    
+                    logging.info(f"🔍 方法3结果: 找到 {len(comments)} 条回复")
+                    
+                except Exception as e:
+                    logging.debug(f"🔍 方法3失败: {e}")
+            
+            # 去重并返回
+            unique_comments = []
+            seen_ids = set()
+            for comment in comments:
+                if comment.id not in seen_ids:
+                    unique_comments.append(comment)
+                    seen_ids.add(comment.id)
+            
+            logging.info(f"🎯 为消息 {message_id} 总共找到 {len(unique_comments)} 条唯一回复")
+            return unique_comments
+            
+        except Exception as e:
+            logging.error(f"获取消息 {message_id} 的评论失败: {e}")
+            return []
+    
+    def _parse_comment_urls(self, chat_id: str, message_id: int) -> List[int]:
+        """解析可能的评论ID - 增强版本，支持多种识别策略"""
+        try:
+            comment_ids = []
+            
+            # 策略1：基于消息ID的偏移量推测（最常用）
+            base_offsets = [-100, -75, -50, -25, -10, -5, -2, -1, 1, 2, 5, 10, 25, 50, 75, 100]
+            for offset in base_offsets:
+                comment_id = message_id + offset
+                if comment_id > 0:
+                    comment_ids.append(comment_id)
+            
+            # 策略2：基于消息ID的倍数关系推测
+            multipliers = [0.5, 0.75, 0.8, 0.9, 1.1, 1.2, 1.25, 1.5, 2.0]
+            for mult in multipliers:
+                comment_id = int(message_id * mult)
+                if comment_id > 0 and comment_id != message_id:
+                    comment_ids.append(comment_id)
+            
+            # 策略3：基于Telegram评论ID的常见规律
+            # 某些频道的评论ID有特定的规律
+            pattern_offsets = []
+            
+            # 检查是否是常见的评论ID模式
+            if message_id < 1000:
+                # 小ID：评论通常在附近
+                pattern_offsets.extend([-20, -15, -10, -5, -3, -2, -1, 1, 2, 3, 5, 10, 15, 20])
+            elif message_id < 10000:
+                # 中等ID：评论可能有更大间隔
+                pattern_offsets.extend([-50, -30, -20, -10, -5, -2, -1, 1, 2, 5, 10, 20, 30, 50])
+            else:
+                # 大ID：评论间隔可能更大
+                pattern_offsets.extend([-100, -75, -50, -25, -10, -5, -2, -1, 1, 2, 5, 10, 25, 50, 75, 100])
+            
+            for offset in pattern_offsets:
+                comment_id = message_id + offset
+                if comment_id > 0:
+                    comment_ids.append(comment_id)
+            
+            # 策略4：基于历史数据的智能推测
+            # 如果之前成功获取过评论，使用相似的模式
+            if hasattr(self, '_comment_patterns') and chat_id in self._comment_patterns:
+                patterns = self._comment_patterns[chat_id]
+                for pattern in patterns:
+                    if pattern['base_id'] == message_id:
+                        # 使用已知的成功模式
+                        for offset in pattern['comment_offsets']:
+                            comment_id = message_id + offset
+                            if comment_id > 0:
+                                comment_ids.append(comment_id)
+                                logging.debug(f"使用已知模式推测评论ID: {comment_id}")
+            
+            # 去重并排序
+            unique_ids = sorted(list(set(comment_ids)))
+            logging.debug(f"增强推测消息 {message_id} 的可能评论ID: {len(unique_ids)} 个")
+            
+            return unique_ids
+            
+        except Exception as e:
+            logging.error(f"解析评论ID失败: {e}")
+            return []
+    
+    async def _identify_messages_with_comments(self, messages: List[Message], detection_mode: str) -> List[Message]:
+        """智能识别可能有评论的消息"""
+        try:
+            messages_with_comments = []
+            
+            if detection_mode == "smart":
+                # 智能模式：基于消息特征识别
+                for message in messages:
+                    if not message or not hasattr(message, 'id'):
+                        continue
+                    
+                    # 检查消息是否有回复信息
+                    if hasattr(message, 'replies') and message.replies:
+                        reply_count = message.replies.replies
+                        if reply_count > 0:
+                            messages_with_comments.append(message)
+                            logging.debug(f"🔍 智能识别：消息 {message.id} 有 {reply_count} 条回复")
+                            continue
+                    
+                    # 检查消息类型（某些类型的消息更容易有评论）
+                    if (hasattr(message, 'text') and message.text and 
+                        len(message.text) > 100):  # 长文本消息
+                        messages_with_comments.append(message)
+                        logging.debug(f"🔍 智能识别：消息 {message.id} 是长文本，可能有评论")
+                        continue
+                    
+                    # 检查是否有媒体（媒体消息通常有评论）
+                    if (hasattr(message, 'photo') or hasattr(message, 'video') or 
+                        hasattr(message, 'document') or hasattr(message, 'audio')):
+                        messages_with_comments.append(message)
+                        logging.debug(f"🔍 智能识别：消息 {message.id} 包含媒体，可能有评论")
+                        continue
+                    
+                    # 检查是否有按钮（有按钮的消息可能有讨论）
+                    if hasattr(message, 'reply_markup') and message.reply_markup:
+                        messages_with_comments.append(message)
+                        logging.debug(f"🔍 智能识别：消息 {message.id} 有按钮，可能有评论")
+                        continue
+            
+            elif detection_mode == "aggressive":
+                # 激进模式：检查所有消息
+                for message in messages:
+                    if not message or not hasattr(message, 'id'):
+                        continue
+                    
+                    # 激进模式：尝试获取每条消息的回复信息
+                    try:
+                        message_obj = await self.client.get_messages(
+                            message.chat.id, 
+                            message.id
+                        )
+                        if message_obj and hasattr(message_obj, 'replies') and message_obj.replies:
+                            reply_count = message_obj.replies.replies
+                            if reply_count > 0:
+                                messages_with_comments.append(message)
+                                logging.debug(f"🔍 激进识别：消息 {message.id} 有 {reply_count} 条回复")
+                    except Exception as e:
+                        logging.debug(f"激进识别消息 {message.id} 失败: {e}")
+                        # 即使获取失败，也添加到候选列表
+                        messages_with_comments.append(message)
+                        logging.debug(f"🔍 激进识别：消息 {message.id} 添加到候选列表")
+            
+            logging.info(f"🎯 评论区识别完成：从 {len(messages)} 条消息中识别出 {len(messages_with_comments)} 条可能有评论的消息")
+            return messages_with_comments
+            
+        except Exception as e:
+            logging.error(f"智能识别可能有评论的消息失败: {e}")
+            return []
+    
+    async def _check_comment_access(self, chat_id: str, message_id: int) -> dict:
+        """检查评论访问权限和状态"""
+        try:
+            access_info = {
+                "can_access": False,
+                "reason": "",
+                "suggestions": []
+            }
+            
+            # 尝试获取消息对象
+            try:
+                message = await self.client.get_messages(chat_id, message_id)
+                if message:
+                    # 检查是否有回复信息
+                    if hasattr(message, 'replies') and message.replies:
+                        reply_count = message.replies.replies
+                        access_info["can_access"] = True
+                        access_info["reason"] = f"消息有 {reply_count} 条回复"
+                        access_info["suggestions"].append("可以尝试获取评论")
+                    else:
+                        access_info["reason"] = "消息没有回复信息"
+                        access_info["suggestions"].append("该消息可能没有评论")
+                else:
+                    access_info["reason"] = "无法获取消息对象"
+                    access_info["suggestions"].append("检查频道访问权限")
+            except Exception as e:
+                if "FORBIDDEN" in str(e):
+                    access_info["reason"] = "访问被禁止"
+                    access_info["suggestions"].append("需要加入频道的讨论群")
+                    access_info["suggestions"].append("检查机器人权限设置")
+                elif "CHANNEL_PRIVATE" in str(e):
+                    access_info["reason"] = "频道为私有频道"
+                    access_info["suggestions"].append("需要成为频道成员")
+                else:
+                    access_info["reason"] = f"访问失败: {e}"
+                    access_info["suggestions"].append("检查网络连接")
+                    access_info["suggestions"].append("检查API限制")
+            
+            logging.info(f"评论访问检查结果: {access_info}")
+            return access_info
+            
+        except Exception as e:
+            logging.error(f"检查评论访问权限失败: {e}")
+            return {
+                "can_access": False,
+                "reason": f"检查失败: {e}",
+                "suggestions": ["检查系统状态"]
+            }
+    
+    async def _get_comments_alternative(self, chat_id: str, message_id: int) -> List[Message]:
+        """替代方法：使用不同的策略获取评论"""
+        try:
+            comments = []
+            
+            # 方法1：直接获取消息的回复
+            try:
+                # 获取消息对象
+                message = await self.client.get_messages(chat_id, message_id)
+                if message:
+                    # 尝试获取该消息的回复
+                    replies = await self.client.get_messages(
+                        chat_id,
+                        message_id,
+                        replies=True,
+                        limit=100
+                    )
+                    
+                    if replies and isinstance(replies, list):
+                        for reply in replies:
+                            if reply and reply.id != message_id:
+                                comments.append(reply)
+                                logging.debug(f"直接获取到回复: {reply.id}")
+                    elif replies and replies.id != message_id:
+                        # 如果只返回一条回复
+                        comments.append(replies)
+                        logging.debug(f"直接获取到单条回复: {replies.id}")
+            except Exception as e:
+                logging.debug(f"直接获取回复失败: {e}")
+            
+            # 方法2：使用历史搜索
+            try:
+                # 搜索最近的消息，看是否有回复
+                recent_messages = await self.client.get_messages(
+                    chat_id,
+                    limit=200  # 获取最近200条消息
+                )
+                
+                for msg in recent_messages:
+                    if (hasattr(msg, 'reply_to_message') and 
+                        msg.reply_to_message and 
+                        msg.reply_to_message.id == message_id):
+                        comments.append(msg)
+                        logging.debug(f"在最近消息中找到回复: {msg.id}")
+            except Exception as e:
+                logging.debug(f"搜索最近消息失败: {e}")
+            
+            # 去重
+            unique_comments = []
+            seen_ids = set()
+            for comment in comments:
+                if comment.id not in seen_ids:
+                    unique_comments.append(comment)
+                    seen_ids.add(comment.id)
+            
+            logging.info(f"替代方法为消息 {message_id} 找到 {len(unique_comments)} 条评论")
+            return unique_comments
+            
+        except Exception as e:
+            logging.error(f"替代方法获取评论失败: {e}")
+            return []
+    
+    async def _report_comment_identification_stats(self, chat_id: str):
+        """报告评论ID识别统计信息"""
+        try:
+            if not hasattr(self, '_comment_patterns') or chat_id not in self._comment_patterns:
+                return
+            
+            patterns = self._comment_patterns[chat_id]
+            if not patterns:
+                return
+            
+            # 统计成功的评论模式
+            total_patterns = len(patterns)
+            total_success = sum(p['success_count'] for p in patterns)
+            avg_success = total_success / total_patterns if total_patterns > 0 else 0
+            
+            # 找出最成功的模式
+            top_patterns = sorted(patterns, key=lambda x: x['success_count'], reverse=True)[:5]
+            
+            logging.info("=" * 50)
+            logging.info("📊 评论ID识别统计报告")
+            logging.info(f"📂 频道: {chat_id}")
+            logging.info(f"🎯 成功模式数量: {total_patterns}")
+            logging.info(f"✅ 总成功次数: {total_success}")
+            logging.info(f"📈 平均成功率: {avg_success:.2f}")
+            logging.info("🏆 最成功的模式:")
+            
+            for i, pattern in enumerate(top_patterns, 1):
+                logging.info(f"📝 {i}. 消息ID: {pattern['base_id']}")
+                logging.info(f"   📍 偏移量: {pattern['comment_offsets']}")
+                logging.info(f"   ✅ 成功次数: {pattern['success_count']}")
+            
+            logging.info("=" * 50)
+            
+        except Exception as e:
+            logging.error(f"生成评论统计报告失败: {e}")
 
 # 使用示例
 async def example_usage():
@@ -1492,3 +2302,30 @@ async def example_usage():
         )
         
         print(f"搬运结果: {result}")
+
+# 评论区识别配置说明
+COMMENT_CONFIG_EXAMPLES = {
+    "智能模式": {
+        "comment_detection_mode": "smart",
+        "说明": "自动识别可能有评论的消息（长文本、媒体、按钮等）"
+    },
+    "激进模式": {
+        "comment_detection_mode": "aggressive", 
+        "说明": "检查所有消息的回复信息，最全面但可能较慢"
+    },
+    "手动模式": {
+        "comment_detection_mode": "manual",
+        "manual_comment_message_ids": [89, 97, 100],
+        "说明": "只处理用户指定的消息ID，最精确"
+    }
+}
+
+# 评论区搬运完整配置示例
+COMMENT_FORWARDING_CONFIG = {
+    "enable_comment_forwarding": True,           # 启用评论区搬运
+    "comment_fetch_strategy": "aggressive",      # 评论获取策略：smart, aggressive, conservative
+    "comment_debug": True,                       # 启用评论调试模式
+    "comment_detection_mode": "smart",           # 评论区识别模式：smart, aggressive, manual
+    "manual_comment_message_ids": [89, 97],      # 手动指定可能有评论的消息ID（手动模式时使用）
+    "comment_test_mode": False,                  # 启用评论测试模式
+}

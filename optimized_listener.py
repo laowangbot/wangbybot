@@ -212,6 +212,47 @@ class OptimizedListener:
     def _should_filter_message(self, message: Message, cfg: Dict) -> bool:
         """检查消息是否应该被过滤"""
         try:
+            # 新增：评论区搬运控制
+            enable_comment_forwarding = cfg.get("enable_comment_forwarding", False)
+            
+            # 如果关闭评论区搬运，只搬运频道主发布的内容
+            if not enable_comment_forwarding:
+                # 检查消息是否来自频道主
+                # 频道主发布的消息通常没有 from_user 字段，或者 from_user 是频道本身
+                if hasattr(message, 'from_user') and message.from_user:
+                    # 如果消息有发送者信息，说明可能是评论或回复
+                    logging.debug(f"消息 {message.id} 被评论区过滤: 非频道主发布 (from_user: {message.from_user.id})")
+                    return True
+                else:
+                    # 没有 from_user 字段，通常是频道主发布的内容
+                    logging.debug(f"消息 {message.id} 通过评论区过滤: 频道主发布")
+            
+            # 新增：只搬运频道主信息
+            if cfg.get("channel_owner_only", False):
+                # 检查消息是否来自频道主
+                if hasattr(message, 'from_user') and message.from_user:
+                    # 如果消息有发送者信息，说明不是频道主发布的
+                    logging.debug(f"消息 {message.id} 被频道主过滤: 非频道主发布")
+                    return True
+            
+            # 新增：只搬运媒体内容
+            if cfg.get("media_only_mode", False):
+                # 检查消息是否包含媒体内容
+                has_media = any([
+                    message.photo,
+                    message.video,
+                    message.video_note,
+                    message.animation,
+                    message.document,
+                    message.audio,
+                    message.voice,
+                    message.sticker
+                ])
+                
+                if not has_media:
+                    logging.debug(f"消息 {message.id} 被媒体过滤: 不包含媒体内容")
+                    return True
+            
             # 关键词过滤
             filter_keywords = cfg.get("filter_keywords", [])
             if filter_keywords:

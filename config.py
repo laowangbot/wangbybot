@@ -6,6 +6,14 @@
 
 import os
 
+# 加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # 如果没有安装 python-dotenv，跳过
+    pass
+
 # 从环境变量获取配置
 def get_env_var(var_name, default=None):
     """获取环境变量"""
